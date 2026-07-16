@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "@/lib/store";
 import { engine } from "@/lib/engine";
 import type { OverlayFlags } from "@/lib/types";
@@ -36,11 +36,56 @@ export default function LiveTab({ onStart }: { onStart: () => void }) {
   const camera = useStore((s) => s.camera);
   const model = useStore((s) => s.model);
   const contacts = useStore((s) => s.contacts);
+  const zones = useStore((s) => s.zones);
+  const addZone = useStore((s) => s.addZone);
+  const clearZones = useStore((s) => s.clearZones);
   const motion = useLiveMotion();
+
+  const stageRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ sx: number; sy: number } | null>(null);
+  const [drawMode, setDrawMode] = useState(false);
+  const [tempRect, setTempRect] = useState<{ x: number; y: number; w: number; h: number } | null>(
+    null,
+  );
 
   const live = camera.status === "live";
   const sorted = [...contacts].sort(
     (a, b) => Number(b.isPest) - Number(a.isPest) || b.score - a.score,
+  );
+
+  // Esc cancels zone drawing.
+  useEffect(() => {
+    if (!drawMode) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setDrawMode(false);
+        setTempRect(null);
+        dragRef.current = null;
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [drawMode]);
+
+  // Screen point -> normalized, un-mirrored video coords (contain letterbox).
+  const screenToVideo = useCallback(
+    (clientX: number, clientY: number) => {
+      const el = stageRef.current;
+      const vw = engine.videoW;
+      const vh = engine.videoH;
+      if (!el || !vw || !vh) return null;
+      const rect = el.getBoundingClientRect();
+      const scale = Math.min(rect.width / vw, rect.height / vh);
+      const offX = (rect.width - vw * scale) / 2;
+      const offY = (rect.height - vh * scale) / 2;
+      const x = (clientX - rect.left - offX) / scale;
+      const y = (clientY - rect.top - offY) / scale;
+      let nx = x / vw;
+      const ny = y / vh;
+      if (settings.mirror) nx = 1 - nx;
+      return { x: Math.min(1, Math.max(0, nx)), y: Math.min(1, Math.max(0, ny)) };
+    },
+    [settings.mirror],
   );
 
   return (
@@ -60,7 +105,7 @@ export default function LiveTab({ onStart }: { onStart: () => void }) {
         ))}
       </div>
 
-      {/* left rail — controls + motion */}
+      {/* left rail — controls, zones, motion */}
       <div className="rail left">
         <div className="panel">
           <div className="panel-head">
@@ -113,6 +158,32 @@ export default function LiveTab({ onStart }: { onStart: () => void }) {
 
         <div className="panel">
           <div className="panel-head">
+            <span className="title">Watch zones</span>
+            <span className="count">{zones.length}</span>
+          </div>
+          <div className="panel-body" style={{ display: "grid", gap: 10 }}>
+            <p style={{ color: "var(--faint)", fontSize: 11.5, margin: 0, lineHeight: 1.5 }}>
+              Draw a rectangle over an entry or hotspot. You&apos;ll get a log entry each time
+              something crosses into it.
+            </p>
+            <div style={{ display: "flex", gap: 7 }}>
+              <button
+                className={`btn${drawMode ? " primary" : ""}`}
+                onClick={() => setDrawMode((d) => !d)}
+                disabled={!live}
+                style={{ flex: 1 }}
+              >
+                {drawMode ? "Drawing…" : "Draw zone"}
+              </button>
+              <button className="btn ghost" onClick={clearZones} disabled={zones.length === 0}>
+                Clear
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="panel">
+          <div className="panel-head">
             <span className="title">Motion</span>
             <span className="count">{motion.regions} zones</span>
           </div>
@@ -134,8 +205,56 @@ export default function LiveTab({ onStart }: { onStart: () => void }) {
       </div>
 
       {/* center stage */}
-      <div className="stage-wrap">
+      <div className="stage-wrap" ref={stageRef}>
         <DetectionOverlay />
+
+        {drawMode && (
+          <div
+            className="zone-draw"
+            onPointerDown={(e) => {
+              e.currentTarget.setPointerCapture(e.pointerId);
+              const rect = stageRef.current!.getBoundingClientRect();
+              dragRef.current = { sx: e.clientX, sy: e.clientY };
+              setTempRect({ x: e.clientX - rect.left, y: e.clientY - rect.top, w: 0, h: 0 });
+            }}
+            onPointerMove={(e) => {
+              const d = dragRef.current;
+              if (!d) return;
+              const rect = stageRef.current!.getBoundingClientRect();
+              setTempRect({
+                x: Math.min(d.sx, e.clientX) - rect.left,
+                y: Math.min(d.sy, e.clientY) - rect.top,
+                w: Math.abs(e.clientX - d.sx),
+                h: Math.abs(e.clientY - d.sy),
+              });
+            }}
+            onPointerUp={(e) => {
+              const d = dragRef.current;
+              dragRef.current = null;
+              setTempRect(null);
+              setDrawMode(false);
+              if (!d) return;
+              const a = screenToVideo(d.sx, d.sy);
+              const b = screenToVideo(e.clientX, e.clientY);
+              if (!a || !b) return;
+              const zx = Math.min(a.x, b.x);
+              const zy = Math.min(a.y, b.y);
+              const zw = Math.abs(a.x - b.x);
+              const zh = Math.abs(a.y - b.y);
+              if (zw < 0.02 || zh < 0.02) return;
+              addZone({ x: zx, y: zy, w: zw, h: zh });
+            }}
+          >
+            <div className="zone-draw-hint">Drag to draw a watch zone · Esc to cancel</div>
+            {tempRect && (
+              <div
+                className="zone-temp"
+                style={{ left: tempRect.x, top: tempRect.y, width: tempRect.w, height: tempRect.h }}
+              />
+            )}
+          </div>
+        )}
+
         {!live && (
           <div className="gate">
             <div className="gate-glyph" />

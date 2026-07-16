@@ -7,6 +7,7 @@ const KINDS: (EventKind | "all")[] = [
   "all",
   "pest",
   "motion",
+  "zone",
   "ingress",
   "enter",
   "exit",

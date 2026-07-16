@@ -19,6 +19,8 @@ export interface EngineState {
   inferenceMs: number;
   videoW: number;
   videoH: number;
+  /** Live occupancy count per watch-zone id, for overlay labels. */
+  zoneOcc: Record<number, number>;
 }
 
 export const engine: EngineState = {
@@ -32,4 +34,5 @@ export const engine: EngineState = {
   inferenceMs: 0,
   videoW: 0,
   videoH: 0,
+  zoneOcc: {},
 };

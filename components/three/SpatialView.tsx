@@ -20,6 +20,8 @@ export interface SpatialFigure {
   z: number;
   segments: [[number, number], [number, number]][];
   head: [number, number] | null;
+  hands: [number, number][];
+  feet: [number, number][];
 }
 
 export interface SpatialMarker {
@@ -35,6 +37,7 @@ const COOL = "#57c7cf";
 const WARM = "#ff8a3d";
 const HOT = "#ff4d4f";
 const BONE = "#d6ecec";
+const HAND_FOOT = "#8fe3e8";
 
 function Contact({ o }: { o: SpatialObject }) {
   const color = o.pest ? WARM : COOL;
@@ -74,6 +77,18 @@ function Figure({ f }: { f: SpatialFigure }) {
           <meshBasicMaterial color={COOL} />
         </mesh>
       )}
+      {f.hands.map((h, i) => (
+        <mesh key={`h${i}`} position={[h[0], h[1], 0]}>
+          <sphereGeometry args={[0.1, 8, 8]} />
+          <meshBasicMaterial color={HAND_FOOT} />
+        </mesh>
+      ))}
+      {f.feet.map((ft, i) => (
+        <mesh key={`f${i}`} position={[ft[0], ft[1], 0]}>
+          <sphereGeometry args={[0.08, 8, 8]} />
+          <meshBasicMaterial color={HAND_FOOT} />
+        </mesh>
+      ))}
     </group>
   );
 }

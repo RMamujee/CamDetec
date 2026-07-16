@@ -66,12 +66,24 @@ export default function SpatialTab() {
           ]);
         }
         const nose = disp[0];
+        const hands: [number, number][] = [];
+        for (const idx of [9, 10]) {
+          const k = disp[idx];
+          if (k && k.score > KP_MIN_SCORE) hands.push([lx(k), ly(k)]);
+        }
+        const feet: [number, number][] = [];
+        for (const idx of [15, 16]) {
+          const k = disp[idx];
+          if (k && k.score > KP_MIN_SCORE) feet.push([lx(k), ly(k)]);
+        }
         figures.push({
           id: pi,
           x: dx(nxCenter),
           z: dz(nyBottom),
           segments,
           head: nose && nose.score > KP_MIN_SCORE ? [lx(nose), ly(nose)] : null,
+          hands,
+          feet,
         });
       });
 

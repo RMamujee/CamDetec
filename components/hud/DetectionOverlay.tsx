@@ -7,6 +7,8 @@ import { SKELETON_EDGES, KP_MIN_SCORE } from "@/lib/pose";
 const COOL = "#57c7cf"; // neutral objects
 const WARM = "#ff8a3d"; // pests / activity
 const BONE = "rgba(214,236,236,0.88)";
+const ZONE = "#57cf98"; // watch zones
+const HAND_FOOT = "#8fe3e8"; // hands / feet accents
 
 /**
  * The live view. The video frame and every overlay are painted onto one canvas
@@ -97,27 +99,91 @@ export default function DetectionOverlay() {
         }
       }
 
-      // skeletons / limbs
+      // watch zones (under skeletons/objects)
+      const zones = useStore.getState().zones;
+      if (zones.length) {
+        for (const z of zones) {
+          const zx1 = mapX(z.x * vw);
+          const zx2 = mapX((z.x + z.w) * vw);
+          const left = Math.min(zx1, zx2);
+          const zw = Math.abs(zx2 - zx1);
+          const top = mapY(z.y * vh);
+          const zh = z.h * vh * scale;
+          ctx.save();
+          ctx.setLineDash([9 * dpr, 6 * dpr]);
+          ctx.strokeStyle = ZONE;
+          ctx.lineWidth = 1.5 * dpr;
+          ctx.strokeRect(left, top, zw, zh);
+          ctx.setLineDash([]);
+          ctx.globalAlpha = 0.06;
+          ctx.fillStyle = ZONE;
+          ctx.fillRect(left, top, zw, zh);
+          ctx.globalAlpha = 1;
+          const occ = engine.zoneOcc[z.id] ?? 0;
+          const label = `ZONE ${z.id}${occ > 0 ? ` · ${occ}` : ""}`;
+          ctx.font = `${11 * dpr}px ui-monospace, SFMono-Regular, monospace`;
+          const lw = ctx.measureText(label).width + 10 * dpr;
+          const lh = 17 * dpr;
+          const ly = top - lh - 2 * dpr < offY ? top + 2 * dpr : top - lh - 2 * dpr;
+          ctx.fillStyle = "rgba(9,12,13,0.82)";
+          ctx.fillRect(left, ly, lw, lh);
+          ctx.fillStyle = ZONE;
+          ctx.textBaseline = "middle";
+          ctx.fillText(label, left + 5 * dpr, ly + lh / 2 + 0.5 * dpr);
+          ctx.restore();
+        }
+      }
+
+      // skeletons / limbs (with hands + feet)
       if (ov.skeleton && engine.poses.length) {
         for (const pose of engine.poses) {
           const kp = pose.keypoints;
+          const ok = (i: number) => kp[i] && kp[i].score >= KP_MIN_SCORE;
           ctx.lineWidth = 2.5;
           ctx.strokeStyle = BONE;
           ctx.lineCap = "round";
           for (const [a, b] of SKELETON_EDGES) {
-            const ka = kp[a];
-            const kb = kp[b];
-            if (!ka || !kb || ka.score < KP_MIN_SCORE || kb.score < KP_MIN_SCORE) continue;
+            if (!ok(a) || !ok(b)) continue;
             ctx.beginPath();
-            ctx.moveTo(mapX(ka.x), mapY(ka.y));
-            ctx.lineTo(mapX(kb.x), mapY(kb.y));
+            ctx.moveTo(mapX(kp[a].x), mapY(kp[a].y));
+            ctx.lineTo(mapX(kp[b].x), mapY(kp[b].y));
             ctx.stroke();
           }
+          // joints
           ctx.fillStyle = COOL;
           for (const k of kp) {
             if (k.score < KP_MIN_SCORE) continue;
             ctx.beginPath();
             ctx.arc(mapX(k.x), mapY(k.y), 3, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          // head at the nose
+          if (ok(0)) {
+            ctx.strokeStyle = HAND_FOOT;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(mapX(kp[0].x), mapY(kp[0].y), Math.max(7, drawH / 90), 0, Math.PI * 2);
+            ctx.stroke();
+          }
+          // hands: emphasized rings at the wrists (9, 10)
+          ctx.fillStyle = HAND_FOOT;
+          ctx.strokeStyle = HAND_FOOT;
+          for (const idx of [9, 10]) {
+            if (!ok(idx)) continue;
+            const hr = Math.max(6, drawW / 150);
+            ctx.globalAlpha = 0.25;
+            ctx.beginPath();
+            ctx.arc(mapX(kp[idx].x), mapY(kp[idx].y), hr, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+          }
+          // feet: markers at the ankles (15, 16)
+          for (const idx of [15, 16]) {
+            if (!ok(idx)) continue;
+            ctx.beginPath();
+            ctx.arc(mapX(kp[idx].x), mapY(kp[idx].y), Math.max(4, drawW / 260), 0, Math.PI * 2);
             ctx.fill();
           }
         }

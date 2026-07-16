@@ -426,6 +426,36 @@ button {
   background: var(--ink-2);
 }
 
+/* zone drawing */
+.zone-draw {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  cursor: crosshair;
+  touch-action: none;
+}
+.zone-draw-hint {
+  position: absolute;
+  left: 50%;
+  top: 16px;
+  transform: translateX(-50%);
+  background: rgba(9, 12, 13, 0.85);
+  border: 1px solid var(--line);
+  color: var(--ok);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  padding: 6px 12px;
+  border-radius: 6px;
+  pointer-events: none;
+}
+.zone-temp {
+  position: absolute;
+  border: 2px dashed var(--ok);
+  background: rgba(87, 207, 152, 0.1);
+  pointer-events: none;
+}
+
 .field {
   display: grid;
   gap: 7px;
@@ -658,6 +688,9 @@ button {
 .evt-kind.enter,
 .evt-kind.ingress {
   color: var(--cool);
+}
+.evt-kind.zone {
+  color: var(--ok);
 }
 .evt-kind.exit {
   color: var(--faint);

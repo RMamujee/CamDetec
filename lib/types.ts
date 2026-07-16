@@ -52,7 +52,16 @@ export interface Pose {
   score: number;
 }
 
-export type EventKind = "enter" | "exit" | "pest" | "motion" | "ingress" | "system";
+export type EventKind = "enter" | "exit" | "pest" | "motion" | "ingress" | "zone" | "system";
+
+/** A user-drawn watch zone in normalized, un-mirrored video coords (0..1). */
+export interface Zone {
+  id: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
 
 export interface EventRecord {
   id: string;

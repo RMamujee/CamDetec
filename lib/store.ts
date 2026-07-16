@@ -10,12 +10,36 @@ import type {
   TabId,
   TrackedObject,
   TrapSuggestion,
+  Zone,
 } from "./types";
 import { DEFAULT_PEST_CLASSES } from "./pest";
 
 const ACTIVITY_BUCKET_MS = 15_000; // 15s buckets
 const ACTIVITY_MAX = 60; // -> 15 minutes of history
 const EVENTS_MAX = 400;
+const ZONES_KEY = "camdetec.zones.v1";
+
+function loadZones(): Zone[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = JSON.parse(localStorage.getItem(ZONES_KEY) ?? "[]");
+    if (!Array.isArray(raw)) return [];
+    return raw.filter(
+      (z) => z && [z.x, z.y, z.w, z.h].every((n) => typeof n === "number") && z.w > 0 && z.h > 0,
+    );
+  } catch {
+    return [];
+  }
+}
+
+function saveZones(zones: Zone[]) {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(ZONES_KEY, JSON.stringify(zones));
+  } catch {
+    /* ignore quota / private-mode errors */
+  }
+}
 
 interface Stats {
   perClass: Record<string, number>;
@@ -63,6 +87,11 @@ interface Store {
 
   trapSuggestions: TrapSuggestion[];
   setTrapSuggestions: (t: TrapSuggestion[]) => void;
+
+  zones: Zone[];
+  addZone: (z: Omit<Zone, "id">) => void;
+  removeZone: (id: number) => void;
+  clearZones: () => void;
 }
 
 const initialOverlays: OverlayFlags = {
@@ -186,4 +215,24 @@ export const useStore = create<Store>((set) => ({
 
   trapSuggestions: [],
   setTrapSuggestions: (t) => set({ trapSuggestions: t }),
+
+  zones: loadZones(),
+  addZone: (z) =>
+    set((s) => {
+      const id = s.zones.reduce((m, x) => Math.max(m, x.id), 0) + 1;
+      const zones = [...s.zones, { ...z, id }];
+      saveZones(zones);
+      return { zones };
+    }),
+  removeZone: (id) =>
+    set((s) => {
+      const zones = s.zones.filter((z) => z.id !== id);
+      saveZones(zones);
+      return { zones };
+    }),
+  clearZones: () =>
+    set(() => {
+      saveZones([]);
+      return { zones: [] };
+    }),
 }));

@@ -46,6 +46,7 @@ export function useDetectionLoop() {
     let lastDwellTime = 0;
     let lastTrapCompute = 0;
     let poseLoading = false;
+    const zonePrev = new Map<number, Set<number>>();
     let loadedDetectorId: string | null = null;
     let detectorLoading = false;
     const frameTimes: number[] = [];
@@ -237,6 +238,41 @@ export function useDetectionLoop() {
             message: `${pestLabel(t.class)} left frame [#${t.id}]`,
           });
         }
+
+        // Watch-zone occupancy + entry events.
+        const zones = store.zones;
+        const occ: Record<number, number> = {};
+        if (zones.length && vw && vh) {
+          for (const z of zones) {
+            const inside = new Set<number>();
+            for (const o of objects) {
+              const cx = (o.bbox[0] + o.bbox[2] / 2) / vw;
+              const cy = (o.bbox[1] + o.bbox[3] / 2) / vh;
+              if (cx >= z.x && cx <= z.x + z.w && cy >= z.y && cy <= z.y + z.h) inside.add(o.id);
+            }
+            occ[z.id] = inside.size;
+            const prev = zonePrev.get(z.id) ?? new Set<number>();
+            for (const o of objects) {
+              if (inside.has(o.id) && !prev.has(o.id)) {
+                store.addEvent({
+                  id: uid(),
+                  t: now,
+                  kind: "zone",
+                  class: o.class,
+                  trackId: o.id,
+                  message: `${pestLabel(o.class)} entered zone ${z.id} [#${o.id}]`,
+                });
+              }
+            }
+            zonePrev.set(z.id, inside);
+          }
+          for (const zid of Array.from(zonePrev.keys())) {
+            if (!zones.some((z) => z.id === zid)) zonePrev.delete(zid);
+          }
+        } else if (zonePrev.size) {
+          zonePrev.clear();
+        }
+        engine.zoneOcc = occ;
 
         if (
           motion.level > 0.06 &&
