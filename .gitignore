@@ -30,6 +30,11 @@ yarn-error.log*
 # oh-my-claudecode local state
 .omc
 
+# secrets / credentials (never commit)
+.roboflow_key
+*.key
+.env*.local
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
