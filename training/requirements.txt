@@ -1,0 +1,4 @@
+# Optional: run the notebook locally with a GPU instead of Colab/Kaggle.
+ultralytics>=8.3.0
+roboflow>=1.1.0
+pyyaml
