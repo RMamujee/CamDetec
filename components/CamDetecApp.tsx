@@ -1,8 +1,9 @@
 "use client";
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { useStore } from "@/lib/store";
 import { useCamera } from "@/lib/useCamera";
 import { useDetectionLoop } from "@/lib/useDetectionLoop";
+import { getRecentEvents, countEvents } from "@/lib/history-db";
 import TopBar from "./hud/TopBar";
 import LiveTab from "./tabs/LiveTab";
 import PestMapTab from "./tabs/PestMapTab";
@@ -16,6 +17,24 @@ export default function CamDetecApp() {
   const { start, stop, restart } = useCamera(videoRef);
   useDetectionLoop();
   const activeTab = useStore((s) => s.activeTab);
+
+  // Restore persistent event history so the log survives reloads.
+  useEffect(() => {
+    let alive = true;
+    getRecentEvents(400)
+      .then((rows) => {
+        if (alive && rows.length) useStore.getState().seedEvents(rows, rows.length);
+      })
+      .catch(() => {});
+    countEvents()
+      .then((n) => {
+        if (alive) useStore.getState().setHistCount(n);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   return (
     <div className="shell">

@@ -13,6 +13,7 @@ import type {
   Zone,
 } from "./types";
 import { DEFAULT_PEST_CLASSES } from "./pest";
+import { persistEvent } from "./history-db";
 
 const ACTIVITY_BUCKET_MS = 15_000; // 15s buckets
 const ACTIVITY_MAX = 60; // -> 15 minutes of history
@@ -74,6 +75,10 @@ interface Store {
   events: EventRecord[];
   addEvent: (e: EventRecord) => void;
   clearEvents: () => void;
+  /** persistent-history count (IndexedDB), and mount-time seeding from it */
+  histCount: number;
+  seedEvents: (events: EventRecord[], count: number) => void;
+  setHistCount: (n: number) => void;
 
   stats: Stats;
   registerContact: (cls: string, isPest: boolean, concurrent: number) => void;
@@ -162,8 +167,20 @@ export const useStore = create<Store>((set) => ({
   setContacts: (c) => set({ contacts: c }),
 
   events: [],
-  addEvent: (e) => set((s) => ({ events: [e, ...s.events].slice(0, EVENTS_MAX) })),
+  histCount: 0,
+  addEvent: (e) => {
+    persistEvent(e); // durable IndexedDB history (fire-and-forget)
+    set((s) => ({ events: [e, ...s.events].slice(0, EVENTS_MAX), histCount: s.histCount + 1 }));
+  },
   clearEvents: () => set({ events: [] }),
+  seedEvents: (loaded, count) =>
+    set((s) => {
+      // merge history under any events already logged this session (dedupe by id)
+      const seen = new Set(s.events.map((e) => e.id));
+      const merged = [...s.events, ...loaded.filter((e) => !seen.has(e.id))].slice(0, EVENTS_MAX);
+      return { events: merged, histCount: count };
+    }),
+  setHistCount: (n) => set({ histCount: n }),
 
   stats: initialStats(),
   registerContact: (cls, isPest, concurrent) =>

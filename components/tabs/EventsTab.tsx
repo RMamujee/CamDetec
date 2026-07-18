@@ -1,6 +1,7 @@
 "use client";
 import { useMemo, useState } from "react";
 import { useStore } from "@/lib/store";
+import { exportEventsCsv, exportEventsJson, clearHistory } from "@/lib/history-db";
 import type { EventKind } from "@/lib/types";
 
 const KINDS: (EventKind | "all")[] = [
@@ -23,7 +24,18 @@ export default function EventsTab() {
   const events = useStore((s) => s.events);
   const clearEvents = useStore((s) => s.clearEvents);
   const activity = useStore((s) => s.activity);
+  const histCount = useStore((s) => s.histCount);
+  const setHistCount = useStore((s) => s.setHistCount);
   const [filter, setFilter] = useState<EventKind | "all">("all");
+
+  async function wipeHistory() {
+    if (typeof window !== "undefined" && !window.confirm("Delete all saved event history? This cannot be undone.")) {
+      return;
+    }
+    await clearHistory();
+    clearEvents();
+    setHistCount(0);
+  }
 
   const filtered = useMemo(
     () => (filter === "all" ? events : events.filter((e) => e.kind === filter)),
@@ -46,8 +58,24 @@ export default function EventsTab() {
               {k}
             </button>
           ))}
-          <button className="btn ghost" onClick={clearEvents} style={{ marginLeft: 8 }}>
+          <span
+            className="mono-caps"
+            style={{ marginLeft: 8, fontSize: 10, color: "var(--text-faint)", alignSelf: "center" }}
+            title="events saved to persistent history"
+          >
+            {histCount} saved
+          </span>
+          <button className="btn ghost" onClick={() => exportEventsCsv()} style={{ marginLeft: 8 }} title="Download all saved events as CSV">
+            CSV
+          </button>
+          <button className="btn ghost" onClick={() => exportEventsJson()} title="Download all saved events as JSON">
+            JSON
+          </button>
+          <button className="btn ghost" onClick={clearEvents} title="Clear the on-screen log (saved history is kept)">
             Clear
+          </button>
+          <button className="btn ghost" onClick={wipeHistory} title="Delete the persistent history (IndexedDB)">
+            Wipe
           </button>
         </div>
       </div>
