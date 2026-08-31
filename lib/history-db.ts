@@ -9,7 +9,17 @@ import type { EventRecord } from "./types";
 
 const DB_NAME = "camdetec";
 const STORE = "events";
-const DB_VERSION = 1;
+const SNAP_STORE = "snapshots";
+const DB_VERSION = 2;
+/** Snapshots are the only heavy rows — cap them so history stays bounded. */
+const SNAPSHOT_MAX = 300;
+
+/** One evidence image, keyed by the id of the event it belongs to. */
+interface SnapshotRecord {
+  id: string;
+  t: number;
+  blob: Blob;
+}
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -22,15 +32,28 @@ function openDB(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
+    // v1 -> v2 adds the snapshot store. Both branches are guarded by name, so a
+    // fresh database and an upgraded one end up identical and the `events` rows
+    // an existing install already holds are never read, rewritten, or dropped.
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(STORE)) {
         const store = db.createObjectStore(STORE, { keyPath: "id" });
         store.createIndex("t", "t", { unique: false });
       }
+      if (!db.objectStoreNames.contains(SNAP_STORE)) {
+        const snaps = db.createObjectStore(SNAP_STORE, { keyPath: "id" });
+        snaps.createIndex("t", "t", { unique: false });
+      }
     };
+    // Another tab still holding v1 open would otherwise stall this forever.
+    req.onblocked = () => reject(new Error("history upgrade blocked by another tab"));
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
+  });
+  // Don't cache a failure: a later call (other tab closed) should get a fresh try.
+  dbPromise.catch(() => {
+    dbPromise = null;
   });
   return dbPromise;
 }
@@ -94,10 +117,98 @@ export async function clearHistory(): Promise<void> {
   if (!hasIDB()) return;
   const db = await openDB();
   await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(STORE, "readwrite");
+    const tx = db.transaction([STORE, SNAP_STORE], "readwrite");
     tx.objectStore(STORE).clear();
+    tx.objectStore(SNAP_STORE).clear(); // images go with the events they document
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
+  });
+}
+
+/* ---------- evidence snapshots ---------- */
+
+/**
+ * Fire-and-forget write of one event's snapshot, then a prune. Events written
+ * before this feature existed simply have no row here, which every reader
+ * treats as "no image".
+ *
+ * `onError` matters: a full disk or a blocked upgrade would otherwise drop
+ * evidence silently while the Settings toggle still reads ON.
+ */
+export function putSnapshot(
+  id: string,
+  t: number,
+  blob: Blob,
+  onError?: (reason: string) => void,
+): void {
+  if (!hasIDB()) {
+    onError?.("IndexedDB unavailable");
+    return;
+  }
+  openDB()
+    .then(async (db) => {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(SNAP_STORE, "readwrite");
+        tx.objectStore(SNAP_STORE).put({ id, t, blob } satisfies SnapshotRecord);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+      await pruneSnapshots(db);
+    })
+    .catch((e) => onError?.((e as Error)?.message ?? "IndexedDB write failed"));
+}
+
+/**
+ * Evict oldest-first back down to the cap, then sweep orphans — images whose
+ * event row is gone. Only the image is ever deleted; the event it documents
+ * stays in the log. Runs only when we are actually over the cap, so the sweep's
+ * one key lookup per surviving image is paid at most once per new snapshot.
+ */
+function pruneSnapshots(db: IDBDatabase): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([STORE, SNAP_STORE], "readwrite");
+    const snaps = tx.objectStore(SNAP_STORE);
+    const events = tx.objectStore(STORE);
+    // Primary keys in time order, oldest first — no cursor to keep alive.
+    const keysReq = snaps.index("t").getAllKeys();
+    keysReq.onsuccess = () => {
+      const keys = keysReq.result as string[];
+      const excess = keys.length - SNAPSHOT_MAX;
+      if (excess <= 0) return; // under the cap; tx completes below
+      for (const k of keys.slice(0, excess)) snaps.delete(k);
+      for (const k of keys.slice(excess)) {
+        const req = events.getKey(k);
+        req.onsuccess = () => {
+          if (req.result === undefined) snaps.delete(k);
+        };
+      }
+    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/** The snapshot for an event, or null when it has none. */
+export async function getSnapshot(id: string): Promise<Blob | null> {
+  if (!hasIDB()) return null;
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(SNAP_STORE, "readonly");
+    const req = tx.objectStore(SNAP_STORE).get(id);
+    req.onsuccess = () => resolve((req.result as SnapshotRecord | undefined)?.blob ?? null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function getAllSnapshots(): Promise<Map<string, Blob>> {
+  if (!hasIDB()) return new Map();
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(SNAP_STORE, "readonly");
+    const req = tx.objectStore(SNAP_STORE).getAll();
+    req.onsuccess = () =>
+      resolve(new Map((req.result as SnapshotRecord[]).map((r) => [r.id, r.blob])));
+    req.onerror = () => reject(req.error);
   });
 }
 
@@ -143,10 +254,34 @@ export async function exportEventsCsv(): Promise<number> {
   return rows.length;
 }
 
-export async function exportEventsJson(): Promise<number> {
+function blobToBase64(b: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(",")[1] ?? "");
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(b);
+  });
+}
+
+/**
+ * JSON export. Images are opt-in: base64 inflates the file by ~4/3 of every
+ * stored JPEG, which is easily tens of megabytes.
+ */
+export async function exportEventsJson(includeImages = false): Promise<number> {
   const rows = await getAllEvents();
+  let payload: unknown = rows;
+  if (includeImages) {
+    const snaps = await getAllSnapshots();
+    payload = await Promise.all(
+      rows.map(async (r) => {
+        const b = snaps.get(r.id);
+        if (!b) return r;
+        return { ...r, snapshot: { mime: b.type || "image/jpeg", base64: await blobToBase64(b) } };
+      }),
+    );
+  }
   download(
-    new Blob([JSON.stringify(rows, null, 2)], { type: "application/json" }),
+    new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }),
     `camdetec-events-${stamp()}.json`,
   );
   return rows.length;

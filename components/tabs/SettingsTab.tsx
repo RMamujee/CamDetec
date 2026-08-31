@@ -1,7 +1,12 @@
 "use client";
+import { useEffect, useState } from "react";
 import { useStore } from "@/lib/store";
 import { engine } from "@/lib/engine";
 import { PEST_CANDIDATE_CLASSES } from "@/lib/pest";
+import { LOW_LIGHT_THRESHOLD } from "@/lib/lowlight";
+import { captureSnapshot } from "@/lib/snapshot";
+import { fireAlert, notificationPermission, requestNotificationPermission } from "@/lib/alerts";
+import type { LowLightMode } from "@/lib/types";
 
 function Switch({ on, onClick }: { on: boolean; onClick: () => void }) {
   return (
@@ -10,6 +15,13 @@ function Switch({ on, onClick }: { on: boolean; onClick: () => void }) {
     </button>
   );
 }
+
+const PERMISSION_TEXT: Record<string, string> = {
+  granted: "permission granted",
+  denied: "blocked — re-enable in the browser's site settings",
+  default: "permission not requested yet",
+  unsupported: "not supported by this browser",
+};
 
 export default function SettingsTab({
   onStart,
@@ -25,12 +37,45 @@ export default function SettingsTab({
   const camera = useStore((s) => s.camera);
   const resetStats = useStore((s) => s.resetStats);
   const setTrapSuggestions = useStore((s) => s.setTrapSuggestions);
+  const alertStatus = useStore((s) => s.alertStatus);
+  const setAlertStatus = useStore((s) => s.setAlertStatus);
+
+  // Permission is read after mount (it doesn't exist on the server) and only
+  // ever *requested* from the button below.
+  const [perm, setPerm] = useState<NotificationPermission | "unsupported" | null>(null);
+  const [testing, setTesting] = useState(false);
+  useEffect(() => setPerm(notificationPermission()), []);
 
   const resetSession = () => {
     resetStats();
     engine.dwell.reset();
     setTrapSuggestions([]);
   };
+
+  async function sendTestAlert() {
+    setTesting(true);
+    try {
+      const video = engine.video;
+      const snapshot =
+        video && camera.status === "live"
+          ? await captureSnapshot(video, { label: "Test alert" })
+          : null;
+      const status = await fireAlert(
+        settings,
+        {
+          title: "CamDetec — test alert",
+          body: `Test alert · ${new Date().toLocaleTimeString()}${
+            snapshot ? " · current frame attached" : " · camera offline, text only"
+          }`,
+          snapshot,
+        },
+        { force: true },
+      );
+      setAlertStatus(status ?? { t: Date.now(), ok: false, text: "no alert channel enabled" });
+    } finally {
+      setTesting(false);
+    }
+  }
 
   return (
     <div className="settings">
@@ -107,6 +152,24 @@ export default function SettingsTab({
             on={settings.poseEnabled}
             onClick={() => setSetting("poseEnabled", !settings.poseEnabled)}
           />
+        </div>
+        <div className="setrow">
+          <div className="lbl">
+            Low-light boost
+            <small>
+              Lifts the frame the model sees after dark. Saved snapshots stay raw — evidence is
+              never brightened.
+            </small>
+          </div>
+          <div />
+          <select
+            value={settings.lowLight}
+            onChange={(e) => setSetting("lowLight", e.target.value as LowLightMode)}
+          >
+            <option value="auto">Auto — below {LOW_LIGHT_THRESHOLD}/255 luma</option>
+            <option value="on">Always on</option>
+            <option value="off">Off</option>
+          </select>
         </div>
       </div>
 
@@ -217,6 +280,179 @@ export default function SettingsTab({
               {cls}
             </button>
           ))}
+        </div>
+      </div>
+
+      {/* Alerts */}
+      <div className="setgroup">
+        <h3>Alerts</h3>
+        <div className="setrow">
+          <div className="lbl">
+            Browser notification
+            <small>A desktop notification the moment a pest event is confirmed.</small>
+          </div>
+          <div className="sub-line">
+            {PERMISSION_TEXT[perm ?? "default"]}
+            {/* Only "default" can still be asked — a denial has to be undone in the browser. */}
+            {perm === "default" && (
+              <button
+                className="btn ghost"
+                style={{ marginLeft: 8 }}
+                onClick={() => requestNotificationPermission().then(setPerm)}
+              >
+                Grant permission
+              </button>
+            )}
+          </div>
+          <Switch
+            on={settings.notifyEnabled}
+            onClick={() => setSetting("notifyEnabled", !settings.notifyEnabled)}
+          />
+        </div>
+
+        <div className="setrow">
+          <div className="lbl">
+            Webhook
+            <small>Posts the alert — with its snapshot — straight from this browser.</small>
+          </div>
+          <div />
+          <Switch
+            on={settings.webhookEnabled}
+            onClick={() => setSetting("webhookEnabled", !settings.webhookEnabled)}
+          />
+        </div>
+        <div className="setrow">
+          <div className="lbl">Destination</div>
+          <div />
+          <select
+            value={settings.webhookKind}
+            onChange={(e) => setSetting("webhookKind", e.target.value as "discord" | "telegram")}
+          >
+            <option value="discord">Discord webhook</option>
+            <option value="telegram">Telegram bot</option>
+          </select>
+        </div>
+        {settings.webhookKind === "discord" ? (
+          <div className="setrow">
+            <div className="lbl">
+              Webhook URL
+              <small>Channel settings → Integrations → Webhooks → Copy URL.</small>
+            </div>
+            <div />
+            <input
+              className="txt"
+              type="text"
+              spellCheck={false}
+              placeholder="https://discord.com/api/webhooks/…"
+              value={settings.discordUrl}
+              onChange={(e) => setSetting("discordUrl", e.target.value)}
+            />
+          </div>
+        ) : (
+          <>
+            <div className="setrow">
+              <div className="lbl">
+                Bot token
+                <small>Issued by @BotFather.</small>
+              </div>
+              <div />
+              <input
+                className="txt"
+                type="password"
+                spellCheck={false}
+                placeholder="123456789:AA…"
+                value={settings.telegramToken}
+                onChange={(e) => setSetting("telegramToken", e.target.value)}
+              />
+            </div>
+            <div className="setrow">
+              <div className="lbl">
+                Chat id
+                <small>The chat or channel the bot posts into.</small>
+              </div>
+              <div />
+              <input
+                className="txt"
+                type="text"
+                spellCheck={false}
+                placeholder="-1001234567890"
+                value={settings.telegramChatId}
+                onChange={(e) => setSetting("telegramChatId", e.target.value)}
+              />
+            </div>
+          </>
+        )}
+
+        <div className="setrow">
+          <div className="lbl">
+            Alert cooldown
+            <small>Per channel. A rodent that settles in stays one alert, not a hundred.</small>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={600}
+            step={15}
+            value={settings.alertCooldownSec}
+            onChange={(e) => setSetting("alertCooldownSec", Number(e.target.value))}
+          />
+          <div className="val">{settings.alertCooldownSec}s</div>
+        </div>
+        <div className="setrow">
+          <div className="lbl">
+            Confirm after
+            <small>
+              Detections a track must accumulate before it counts. Raising this also delays
+              on-screen boxes and zone counts, for every class — not just pest alerts.
+            </small>
+          </div>
+          <input
+            type="range"
+            min={1}
+            max={10}
+            step={1}
+            value={settings.alertMinFrames}
+            onChange={(e) => setSetting("alertMinFrames", Number(e.target.value))}
+          />
+          <div className="val">{settings.alertMinFrames} f</div>
+        </div>
+
+        <div className="setrow">
+          <div className="lbl">
+            Send test alert
+            <small>Fires every enabled channel now, ignoring cooldowns.</small>
+          </div>
+          <div className={`sub-line${alertStatus && !alertStatus.ok ? " bad" : ""}`}>
+            {alertStatus
+              ? `${new Date(alertStatus.t).toLocaleTimeString()} — ${alertStatus.text}`
+              : "no alert sent yet"}
+          </div>
+          <button className="btn" onClick={sendTestAlert} disabled={testing}>
+            {testing ? "Sending…" : "Test"}
+          </button>
+        </div>
+        <div className="note">
+          <b>On-device only:</b> webhook URLs and bot tokens are saved in this browser&apos;s
+          localStorage and posted directly to Discord/Telegram — CamDetec has no server to send
+          them to. Anyone with access to this browser profile can read them.
+        </div>
+      </div>
+
+      {/* Evidence */}
+      <div className="setgroup">
+        <h3>Evidence</h3>
+        <div className="setrow">
+          <div className="lbl">
+            Event snapshots
+            <small>
+              Store an annotated JPEG for each confirmed pest event. The newest 300 are kept.
+            </small>
+          </div>
+          <div />
+          <Switch
+            on={settings.snapshotsEnabled}
+            onClick={() => setSetting("snapshotsEnabled", !settings.snapshotsEnabled)}
+          />
         </div>
       </div>
 

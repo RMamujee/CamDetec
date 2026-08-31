@@ -8,6 +8,10 @@ import { Tracker } from "./tracker";
 import { PoseEngine } from "./pose";
 import { computeTrapSuggestions } from "./dwell";
 import { isPestClass, pestLabel } from "./pest";
+import { lowLightState } from "./lowlight";
+import { captureSnapshot } from "./snapshot";
+import { putSnapshot } from "./history-db";
+import { fireAlert } from "./alerts";
 import type { Diagnostics, RawDetection, TrackedObject } from "./types";
 
 const uid = () =>
@@ -18,6 +22,53 @@ const uid = () =>
 /** Bottom-center of a bbox, normalized to 0..1 — an object's ground contact. */
 function groundPoint(o: TrackedObject, vw: number, vh: number): [number, number] {
   return [(o.bbox[0] + o.bbox[2] / 2) / vw, (o.bbox[1] + o.bbox[3]) / vh];
+}
+
+/**
+ * A confirmed pest event: keep the evidence, then tell someone. Fire-and-forget
+ * — the loop must never wait on JPEG encoding or the network. The frame is
+ * grabbed synchronously at call time, before the video advances; everything
+ * after that is off the hot path.
+ */
+async function raisePestAlert(
+  eventId: string,
+  track: TrackedObject,
+  when: number,
+  video: HTMLVideoElement,
+) {
+  const settings = useStore.getState().settings;
+  try {
+    let snapshot: Blob | null = null;
+    if (settings.snapshotsEnabled) {
+      snapshot = await captureSnapshot(video, {
+        box: track.bbox,
+        label: pestLabel(track.class),
+        score: track.score,
+      });
+      if (snapshot) {
+        putSnapshot(eventId, when, snapshot, (reason) =>
+          useStore
+            .getState()
+            .setAlertStatus({ t: Date.now(), ok: false, text: `snapshot save failed — ${reason}` }),
+        );
+      }
+    }
+    const status = await fireAlert(settings, {
+      title: "CamDetec — pest detected",
+      body: `${pestLabel(track.class)} · ${Math.round(track.score * 100)}% · ${new Date(
+        when,
+      ).toLocaleTimeString()}`,
+      snapshot,
+    });
+    if (status) useStore.getState().setAlertStatus(status);
+  } catch (e) {
+    // Alert plumbing must be visible, never fatal.
+    useStore.getState().setAlertStatus({
+      t: Date.now(),
+      ok: false,
+      text: (e as Error)?.message ?? "alert failed",
+    });
+  }
 }
 
 /**
@@ -125,6 +176,8 @@ export function useDetectionLoop() {
         charging: b?.charging ?? null,
         rttMs: conn?.rtt ?? null,
         posesActive: engine.poses.length,
+        lowLightActive: lowLightState.active,
+        luma: lowLightState.luma,
       };
     }
 
@@ -152,7 +205,7 @@ export function useDetectionLoop() {
         if (det && useStore.getState().model.status === "ready") {
           const t0 = performance.now();
           try {
-            const raw = await det.detect(video, st.settings.maxDetections);
+            const raw = await det.detect(video, st.settings.maxDetections, st.settings.lowLight);
             detections = raw.filter((d) => d.score >= st.settings.confidence);
             lastDetections = detections;
             engine.inferenceMs = performance.now() - t0;
@@ -180,7 +233,10 @@ export function useDetectionLoop() {
         const pestClasses = st.settings.pestClasses;
         const { objects, entered, exited } = trackerRef.current!.update(detections, now, {
           smoothing: st.settings.smoothing,
-          minHits: 3,
+          // Confirmation threshold: a track must be matched this many times
+          // (cumulative hits — `age` never resets on a miss) before it becomes
+          // an event, and so before it can alert.
+          minHits: Math.max(1, Math.round(st.settings.alertMinFrames)),
           maxMissed: Math.max(4, Math.round(st.settings.targetFps * 0.8)),
           iouThreshold: 0.25,
           isPest: (cls) => pestMode && isPestClass(cls, pestClasses),
@@ -215,8 +271,9 @@ export function useDetectionLoop() {
           store.registerContact(t.class, t.isPest, objects.length);
           const [nx, ny] = groundPoint(t, vw, vh);
           engine.dwell.markIngress(nx, ny, t.isPest ? 2 : 1);
+          const eventId = uid();
           store.addEvent({
-            id: uid(),
+            id: eventId,
             t: now,
             kind: t.isPest ? "pest" : "enter",
             class: t.class,
@@ -225,6 +282,9 @@ export function useDetectionLoop() {
               ? `Pest contact — ${pestLabel(t.class)} [#${t.id}]`
               : `${pestLabel(t.class)} entered frame [#${t.id}]`,
           });
+          // One snapshot + alert per confirmed pest track, at the moment the
+          // event is born. Cooldowns live in the alert layer.
+          if (t.isPest) void raisePestAlert(eventId, t, now, video);
         }
         for (const t of exited) {
           const [nx, ny] = groundPoint(t, vw, vh);

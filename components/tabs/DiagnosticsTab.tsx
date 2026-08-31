@@ -42,6 +42,14 @@ export default function DiagnosticsTab() {
       meter: d.battery != null ? d.battery / 100 : undefined,
     },
     { k: "Uptime", v: fmtUptime(now - stats.sessionStart) },
+    {
+      // Boost applies to the inference input only — stored snapshots stay raw.
+      k: "Low light",
+      v: d.lowLightActive ? "BOOST" : d.luma != null ? "OFF" : "—",
+      sub: d.luma != null ? `luma ${Math.round(d.luma)}` : undefined,
+      warm: d.lowLightActive,
+      meter: d.luma != null ? Math.min(1, d.luma / 255) : undefined,
+    },
   ];
 
   return (

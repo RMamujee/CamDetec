@@ -12,6 +12,7 @@ import type {
   TrapSuggestion,
   Zone,
 } from "./types";
+import type { AlertStatus } from "./alerts";
 import { DEFAULT_PEST_CLASSES } from "./pest";
 import { persistEvent } from "./history-db";
 
@@ -19,6 +20,7 @@ const ACTIVITY_BUCKET_MS = 15_000; // 15s buckets
 const ACTIVITY_MAX = 60; // -> 15 minutes of history
 const EVENTS_MAX = 400;
 const ZONES_KEY = "camdetec.zones.v1";
+const ALERTS_KEY = "camdetec.alerts.v1";
 
 function loadZones(): Zone[] {
   if (typeof window === "undefined") return [];
@@ -60,6 +62,10 @@ interface Store {
   settings: Settings;
   setSetting: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
   togglePestClass: (cls: string) => void;
+
+  /** Outcome of the last alert delivery attempt — shown in Settings, never thrown. */
+  alertStatus: AlertStatus | null;
+  setAlertStatus: (s: AlertStatus | null) => void;
 
   camera: { status: CameraStatus; error?: string; width: number; height: number };
   setCamera: (patch: Partial<Store["camera"]>) => void;
@@ -110,7 +116,7 @@ const initialOverlays: OverlayFlags = {
   skeleton: true,
 };
 
-const initialSettings: Settings = {
+const baseSettings: Settings = {
   detectorId: "coco-ssd",
   confidence: 0.5,
   motionSensitivity: 0.6,
@@ -122,7 +128,74 @@ const initialSettings: Settings = {
   deviceId: null,
   maxDetections: 20,
   smoothing: 0.6,
+  lowLight: "auto",
+  alertMinFrames: 3,
+  alertCooldownSec: 120,
+  notifyEnabled: false,
+  webhookEnabled: false,
+  webhookKind: "discord",
+  discordUrl: "",
+  telegramToken: "",
+  telegramChatId: "",
+  snapshotsEnabled: true,
 };
+
+/**
+ * The alert/evidence slice is the one part of settings worth persisting: it
+ * holds webhook credentials, and retyping a bot token after every reload is not
+ * a feature. Stored on-device only, never sent anywhere but the webhook itself.
+ */
+const PERSISTED_KEYS = [
+  "lowLight",
+  "alertMinFrames",
+  "alertCooldownSec",
+  "notifyEnabled",
+  "webhookEnabled",
+  "webhookKind",
+  "discordUrl",
+  "telegramToken",
+  "telegramChatId",
+  "snapshotsEnabled",
+] as const;
+const PERSISTED = new Set<string>(PERSISTED_KEYS);
+
+/** Union-typed fields need their value checked, not just their type. */
+const PERSISTED_ENUMS: Record<string, readonly string[]> = {
+  lowLight: ["auto", "on", "off"],
+  webhookKind: ["discord", "telegram"],
+};
+
+function loadPersistedSettings(): Partial<Settings> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = JSON.parse(localStorage.getItem(ALERTS_KEY) ?? "{}");
+    if (!raw || typeof raw !== "object") return {};
+    const out: Record<string, unknown> = {};
+    for (const k of PERSISTED_KEYS) {
+      // Shape-check against the default so a hand-edited entry can't poison the UI.
+      if (typeof raw[k] !== typeof baseSettings[k]) continue;
+      const allowed = PERSISTED_ENUMS[k];
+      if (allowed && !allowed.includes(raw[k])) continue;
+      out[k] = raw[k];
+    }
+    return out as Partial<Settings>;
+  } catch {
+    return {};
+  }
+}
+
+function savePersistedSettings(s: Settings) {
+  if (typeof window === "undefined") return;
+  try {
+    const out: Record<string, unknown> = {};
+    for (const k of PERSISTED_KEYS) out[k] = s[k];
+    localStorage.setItem(ALERTS_KEY, JSON.stringify(out));
+  } catch {
+    /* ignore quota / private-mode errors */
+  }
+}
+
+const initialSettings: Settings = { ...baseSettings, ...loadPersistedSettings() };
 
 const initialStats = (): Stats => ({
   perClass: {},
@@ -141,7 +214,12 @@ export const useStore = create<Store>((set) => ({
     set((s) => ({ overlays: { ...s.overlays, [key]: !s.overlays[key] } })),
 
   settings: initialSettings,
-  setSetting: (key, value) => set((s) => ({ settings: { ...s.settings, [key]: value } })),
+  setSetting: (key, value) =>
+    set((s) => {
+      const settings = { ...s.settings, [key]: value };
+      if (PERSISTED.has(key)) savePersistedSettings(settings);
+      return { settings };
+    }),
   togglePestClass: (cls) =>
     set((s) => {
       const has = s.settings.pestClasses.includes(cls);
@@ -154,6 +232,9 @@ export const useStore = create<Store>((set) => ({
         },
       };
     }),
+
+  alertStatus: null,
+  setAlertStatus: (a) => set({ alertStatus: a }),
 
   camera: { status: "idle", width: 0, height: 0 },
   setCamera: (patch) => set((s) => ({ camera: { ...s.camera, ...patch } })),
@@ -227,6 +308,8 @@ export const useStore = create<Store>((set) => ({
     charging: null,
     rttMs: null,
     posesActive: 0,
+    lowLightActive: false,
+    luma: null,
   },
   setDiagnostics: (d) => set({ diagnostics: d }),
 

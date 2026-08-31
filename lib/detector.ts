@@ -1,4 +1,5 @@
-import type { RawDetection } from "./types";
+import type { LowLightMode, RawDetection } from "./types";
+import { boostLowLight, canvasLuma, decideLowLight, tensorLuma } from "./lowlight";
 
 /**
  * A swappable object detector. The whole app talks to this interface and never
@@ -10,7 +11,12 @@ export interface Detector {
   readonly label: string;
   readonly vocabulary: string;
   load(onProgress?: (msg: string) => void): Promise<void>;
-  detect(input: HTMLVideoElement, maxDetections: number): Promise<RawDetection[]>;
+  /** `lowLight` brightens the inference input only; stored frames stay raw. */
+  detect(
+    input: HTMLVideoElement,
+    maxDetections: number,
+    lowLight?: LowLightMode,
+  ): Promise<RawDetection[]>;
   backend(): string;
   dispose(): void;
 }
@@ -43,15 +49,34 @@ export class CocoSsdDetector implements Detector {
     onProgress?.("model ready");
   }
 
-  async detect(input: HTMLVideoElement, maxDetections: number): Promise<RawDetection[]> {
+  async detect(
+    input: HTMLVideoElement,
+    maxDetections: number,
+    lowLight: LowLightMode = "off",
+  ): Promise<RawDetection[]> {
     if (!this.model) return [];
-    const preds = await this.model.detect(input, maxDetections);
+    const tf = this.tf;
+    // This model takes the video element directly, so luma comes from a small
+    // canvas sample and a boosted frame is only materialised when it's needed.
+    const luma = lowLight === "off" || !tf ? null : canvasLuma(input);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return preds.map((p: any) => ({
-      bbox: p.bbox as [number, number, number, number],
-      class: p.class as string,
-      score: p.score as number,
-    }));
+    let boosted: any = null;
+    if (decideLowLight(lowLight, luma) && tf) {
+      boosted = tf.tidy(() =>
+        boostLowLight(tf.browser.fromPixels(input).toFloat().div(255)).mul(255).cast("int32"),
+      );
+    }
+    try {
+      const preds = await this.model.detect(boosted ?? input, maxDetections);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return preds.map((p: any) => ({
+        bbox: p.bbox as [number, number, number, number],
+        class: p.class as string,
+        score: p.score as number,
+      }));
+    } finally {
+      boosted?.dispose();
+    }
   }
 
   backend(): string {
@@ -105,10 +130,20 @@ export class YoloTfjsDetector implements Detector {
     this.labels = await res.json();
     onProgress?.("loading pest weights");
     this.model = await tf.loadGraphModel(this.modelUrl);
+    // Warm up on a blank frame: the first inference compiles every WebGL shader
+    // the graph needs (~5s), and paying that here keeps it out of the live loop.
+    onProgress?.("warming up");
+    const warm = tf.tidy(() => this.model.execute(tf.zeros([1, this.imgsz, this.imgsz, 3])));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (Array.isArray(warm) ? warm : [warm]).forEach((t: any) => t.dispose?.());
     onProgress?.("model ready");
   }
 
-  async detect(input: HTMLVideoElement, maxDetections: number): Promise<RawDetection[]> {
+  async detect(
+    input: HTMLVideoElement,
+    maxDetections: number,
+    lowLight: LowLightMode = "off",
+  ): Promise<RawDetection[]> {
     if (!this.model || !this.tf) return [];
     const tf = this.tf;
     const imgsz = this.imgsz;
@@ -117,13 +152,18 @@ export class YoloTfjsDetector implements Detector {
     const vh = input.videoHeight;
     if (!vw || !vh) return [];
 
-    const input4d = tf.tidy(() =>
-      tf.browser.fromPixels(input).resizeBilinear([imgsz, imgsz]).div(255).expandDims(0),
-    );
+    const input4d = tf.tidy(() => {
+      const x = tf.browser.fromPixels(input).resizeBilinear([imgsz, imgsz]).div(255).expandDims(0);
+      // Luma is read off the already-downscaled tensor — no extra frame copy.
+      const luma = lowLight === "off" ? null : tensorLuma(tf, x);
+      return decideLowLight(lowLight, luma) ? boostLowLight(x) : x;
+    });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let output: any;
     try {
-      output = await this.model.executeAsync(input4d);
+      // The exported graph has no control flow or dynamic shapes, so the
+      // synchronous path applies (tfjs itself logs a hint to that effect).
+      output = this.model.execute(input4d);
     } finally {
       input4d.dispose();
     }
@@ -171,8 +211,16 @@ export class YoloTfjsDetector implements Detector {
     const out: RawDetection[] = [];
     for (let k = 0; k < boxesArr.length; k++) {
       const [y1, x1, y2, x2] = boxesArr[k];
+      // Clamp to the frame: the head can predict boxes that run past the edges,
+      // and everything downstream (tracker IoU, dwell ground point, snapshot
+      // annotation) assumes coordinates inside the video.
+      const bx = Math.min(Math.max(x1 * sx, 0), vw);
+      const by = Math.min(Math.max(y1 * sy, 0), vh);
+      const bw = Math.min(Math.max(x2 * sx, 0), vw) - bx;
+      const bh = Math.min(Math.max(y2 * sy, 0), vh) - by;
+      if (bw <= 0 || bh <= 0) continue;
       out.push({
-        bbox: [x1 * sx, y1 * sy, (x2 - x1) * sx, (y2 - y1) * sy],
+        bbox: [bx, by, bw, bh],
         class: this.labels[classesArr[k]] ?? `class_${classesArr[k]}`,
         score: scoresArr[k],
       });

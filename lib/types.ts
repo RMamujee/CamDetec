@@ -72,6 +72,9 @@ export interface EventRecord {
   trackId?: number;
 }
 
+/** How the inference input is brightened: never applied to stored snapshots. */
+export type LowLightMode = "auto" | "on" | "off";
+
 export interface Diagnostics {
   fps: number;
   inferenceMs: number;
@@ -83,6 +86,9 @@ export interface Diagnostics {
   charging: boolean | null;
   rttMs: number | null;
   posesActive: number;
+  /** Whether the last inference input was brightened, and the luma that decided it. */
+  lowLightActive: boolean;
+  luma: number | null;
 }
 
 export interface ActivityBucket {
@@ -135,4 +141,21 @@ export interface Settings {
   deviceId: string | null;
   maxDetections: number;
   smoothing: number;
+  lowLight: LowLightMode;
+
+  /* Alerts. Detections a track must accumulate before it is confirmed — which
+     gates its on-screen box and zone counts as well as its event and alert. */
+  alertMinFrames: number;
+  /** Seconds each channel stays quiet after firing. */
+  alertCooldownSec: number;
+  notifyEnabled: boolean;
+  webhookEnabled: boolean;
+  webhookKind: "discord" | "telegram";
+  /** Stored in localStorage on this device only — never leaves the browser. */
+  discordUrl: string;
+  telegramToken: string;
+  telegramChatId: string;
+
+  /** Capture a JPEG of the frame behind each confirmed pest event. */
+  snapshotsEnabled: boolean;
 }
