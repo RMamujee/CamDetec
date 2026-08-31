@@ -310,6 +310,8 @@ export const useStore = create<Store>((set) => ({
     posesActive: 0,
     lowLightActive: false,
     luma: null,
+    detectorErrors: 0,
+    detectorError: null,
   },
   setDiagnostics: (d) => set({ diagnostics: d }),
 

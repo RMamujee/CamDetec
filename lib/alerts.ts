@@ -43,13 +43,37 @@ export function notificationPermission(): NotificationPermission | "unsupported"
   return Notification.permission;
 }
 
+let swReady: Promise<ServiceWorkerRegistration | null> | null = null;
+
+/**
+ * Android Chrome throws "Illegal constructor" on `new Notification()` — there,
+ * notifications only come from a service worker registration. Registered
+ * lazily (never on page load) and memoized; a browser or insecure context
+ * without service workers resolves null and takes the constructor path.
+ */
+function ensureNotificationWorker(): Promise<ServiceWorkerRegistration | null> {
+  if (swReady) return swReady;
+  swReady =
+    typeof navigator === "undefined" || !("serviceWorker" in navigator)
+      ? Promise.resolve(null)
+      : navigator.serviceWorker
+          .register("/sw.js")
+          .then(() => navigator.serviceWorker.ready)
+          .catch(() => null);
+  return swReady;
+}
+
 /** Asked for from a Settings button only — never on page load. */
 export async function requestNotificationPermission(): Promise<
   NotificationPermission | "unsupported"
 > {
   if (typeof Notification === "undefined") return "unsupported";
   try {
-    return await Notification.requestPermission();
+    const result = await Notification.requestPermission();
+    // Get the worker in place now, so the first real alert isn't the thing
+    // waiting on a registration.
+    if (result === "granted") void ensureNotificationWorker();
+    return result;
   } catch {
     return Notification.permission;
   }
@@ -64,11 +88,25 @@ async function sendNotification(msg: AlertMessage): Promise<Delivery> {
     return { delivered: false, text: "notifications not permitted" };
   }
   const url = msg.snapshot ? URL.createObjectURL(msg.snapshot) : undefined;
-  const n = new Notification(msg.title, { body: msg.body, icon: url, tag: "camdetec-alert" });
-  if (url) {
-    const revoke = () => URL.revokeObjectURL(url);
-    n.addEventListener("close", revoke);
-    setTimeout(revoke, 60_000);
+  const options: NotificationOptions = {
+    body: msg.body,
+    icon: url,
+    tag: "camdetec-alert",
+  };
+  const revoke = url ? () => URL.revokeObjectURL(url) : null;
+
+  const registration = await ensureNotificationWorker();
+  if (registration) {
+    await registration.showNotification(msg.title, options);
+    // A worker notification outlives this page, so the URL can only be freed on
+    // a timer — long enough for the icon to have been read.
+    if (revoke) setTimeout(revoke, 60_000);
+  } else {
+    const n = new Notification(msg.title, options);
+    if (revoke) {
+      n.addEventListener("close", revoke);
+      setTimeout(revoke, 60_000);
+    }
   }
   return { delivered: true, text: "notified" };
 }

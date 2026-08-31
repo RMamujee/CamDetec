@@ -21,10 +21,11 @@ function fmtTime(t: number): string {
 }
 
 /**
- * Evidence thumbnail. The blob is only read once the row scrolls into view, and
- * its object URL is revoked on unmount — a few hundred live URLs would pin
- * every stored JPEG in memory. Events with no snapshot (anything logged before
- * the feature, or with snapshots turned off) simply render nothing.
+ * Evidence thumbnail. The blob is read when the row scrolls into view and
+ * released again when it leaves — a few hundred live object URLs would pin
+ * every stored JPEG in memory, and an IDB re-read on scroll-back is cheap.
+ * Events with no snapshot (anything logged before the feature, or with
+ * snapshots turned off) simply render nothing.
  */
 function EventThumb({ id, onOpen }: { id: string; onOpen: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -34,14 +35,23 @@ function EventThumb({ id, onOpen }: { id: string; onOpen: () => void }) {
     const el = ref.current;
     if (!el) return;
     let alive = true;
+    let visible = false;
     let objectUrl: string | null = null;
+    const release = () => {
+      if (!objectUrl) return;
+      URL.revokeObjectURL(objectUrl);
+      objectUrl = null;
+      setUrl(null);
+    };
     const io = new IntersectionObserver(
       (entries) => {
-        if (!entries.some((e) => e.isIntersecting)) return;
-        io.disconnect();
+        visible = entries[entries.length - 1].isIntersecting;
+        if (!visible) return release();
+        if (objectUrl) return;
         getSnapshot(id)
           .then((b) => {
-            if (!alive || !b) return;
+            // A fast scroll can land this after the row has left again.
+            if (!alive || !visible || !b) return;
             objectUrl = URL.createObjectURL(b);
             setUrl(objectUrl);
           })
@@ -53,7 +63,7 @@ function EventThumb({ id, onOpen }: { id: string; onOpen: () => void }) {
     return () => {
       alive = false;
       io.disconnect();
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      release();
     };
   }, [id]);
 
@@ -168,7 +178,7 @@ export default function EventsTab() {
           ))}
           <span
             className="mono-caps"
-            style={{ marginLeft: 8, fontSize: 10, color: "var(--text-faint)", alignSelf: "center" }}
+            style={{ marginLeft: 8, fontSize: 10, color: "var(--faint)", alignSelf: "center" }}
             title="events saved to persistent history"
           >
             {histCount} saved
@@ -197,10 +207,10 @@ export default function EventsTab() {
 
       <div className="timeline">
         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
-          <span className="mono-caps" style={{ fontSize: 10, color: "var(--text-faint)" }}>
+          <span className="mono-caps" style={{ fontSize: 10, color: "var(--faint)" }}>
             Activity — last 15 min
           </span>
-          <span className="mono-caps" style={{ fontSize: 10, color: "var(--text-faint)" }}>
+          <span className="mono-caps" style={{ fontSize: 10, color: "var(--faint)" }}>
             {activity.reduce((n, a) => n + a.count, 0)} detections
           </span>
         </div>

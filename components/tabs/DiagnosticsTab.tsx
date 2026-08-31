@@ -23,7 +23,15 @@ export default function DiagnosticsTab() {
   const classEntries = Object.entries(stats.perClass).sort((a, b) => b[1] - a[1]);
   const maxClass = Math.max(1, ...classEntries.map((e) => e[1]));
 
-  const tiles: { k: string; v: string; sub?: string; warm?: boolean; meter?: number }[] = [
+  const tiles: {
+    k: string;
+    v: string;
+    sub?: string;
+    warm?: boolean;
+    meter?: number;
+    /** Long-form detail on hover — keeps error text out of the tile layout. */
+    hint?: string;
+  }[] = [
     { k: "Throughput", v: String(d.fps), sub: "fps", meter: Math.min(1, d.fps / 30) },
     { k: "Inference", v: String(d.inferenceMs), sub: "ms", meter: Math.min(1, d.inferenceMs / 200) },
     { k: "Bodies", v: String(d.posesActive) },
@@ -50,6 +58,15 @@ export default function DiagnosticsTab() {
       warm: d.lowLightActive,
       meter: d.luma != null ? Math.min(1, d.luma / 255) : undefined,
     },
+    {
+      // A detector that fails every frame still reports "ready" — this is the
+      // only place that shows it.
+      k: "Detect errors",
+      v: String(d.detectorErrors),
+      sub: d.detectorErrors > 0 ? "in a row" : undefined,
+      warm: d.detectorErrors > 0,
+      hint: d.detectorError ?? undefined,
+    },
   ];
 
   return (
@@ -59,7 +76,7 @@ export default function DiagnosticsTab() {
       </div>
       <div className="tile-grid">
         {tiles.map((t) => (
-          <div key={t.k} className={`tile${t.warm ? " warm" : ""}`}>
+          <div key={t.k} className={`tile${t.warm ? " warm" : ""}`} title={t.hint}>
             <div className="k">{t.k}</div>
             <div className="v">
               {t.v}

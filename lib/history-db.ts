@@ -1,9 +1,10 @@
 // Persistent event history for CamDetec.
 //
 // The store keeps only the last ~400 events in memory and loses them on reload.
-// This IndexedDB layer durably records every event so activity survives reloads
-// and can be exported to CSV/JSON for tracking a location over days. It is a thin
-// wrapper — no dependencies — and every call is a no-op during SSR.
+// This IndexedDB layer durably records events — the newest EVENT_MAX of them —
+// so activity survives reloads and can be exported to CSV/JSON for tracking a
+// location over days. It is a thin wrapper — no dependencies — and every call
+// is a no-op during SSR.
 
 import type { EventRecord } from "./types";
 
@@ -13,6 +14,15 @@ const SNAP_STORE = "snapshots";
 const DB_VERSION = 2;
 /** Snapshots are the only heavy rows — cap them so history stays bounded. */
 const SNAPSHOT_MAX = 300;
+/**
+ * Event rows are small, but a camera left running for weeks writes a lot of
+ * them. Keep well over the 400 the in-memory log holds, so a reload still fills
+ * the log and exports still cover days.
+ */
+const EVENT_MAX = 1000;
+/** Pruning walks the key list, so amortise it over many writes. */
+const PRUNE_EVERY = 50;
+let writesSincePrune = 0;
 
 /** One evidence image, keyed by the id of the event it belongs to. */
 interface SnapshotRecord {
@@ -65,8 +75,35 @@ export function persistEvent(e: EventRecord): void {
     .then((db) => {
       const tx = db.transaction(STORE, "readwrite");
       tx.objectStore(STORE).put(e);
+      if (++writesSincePrune >= PRUNE_EVERY) {
+        writesSincePrune = 0;
+        // After the write commits, so this row is counted and — being the
+        // newest — is never among the ones trimmed.
+        tx.oncomplete = () => void pruneEvents(db).catch(() => {});
+      }
     })
     .catch(() => {});
+}
+
+/**
+ * Trim the durable log to the newest EVENT_MAX rows, oldest first. Deletes
+ * only, no schema change. Snapshots left behind by a trimmed event are cleaned
+ * up by the orphan sweep in `pruneSnapshots`.
+ */
+function pruneEvents(db: IDBDatabase): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    const events = tx.objectStore(STORE);
+    const keysReq = events.index("t").getAllKeys();
+    keysReq.onsuccess = () => {
+      const keys = keysReq.result as string[];
+      const excess = keys.length - EVENT_MAX;
+      if (excess <= 0) return; // under the cap; tx completes below
+      for (const k of keys.slice(0, excess)) events.delete(k);
+    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
 }
 
 /** Most-recent `limit` events, newest first (matches the store's ordering). */

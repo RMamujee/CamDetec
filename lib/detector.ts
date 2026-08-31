@@ -167,44 +167,56 @@ export class YoloTfjsDetector implements Detector {
     } finally {
       input4d.dispose();
     }
-    const outT = Array.isArray(output) ? output[0] : output;
-
+    // Decode and NMS run outside a tidy (they await), so every intermediate is
+    // tracked by hand the instant it exists — including the graph output. A
+    // throw anywhere below (a lost WebGL context is the realistic one) would
+    // otherwise strand tensors on the GPU, once per frame, forever.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const decoded = tf.tidy(() => {
-      let t = outT.squeeze(); // [4+nc, N] or [N, 4+nc]
-      if (t.shape[0] === 4 + nc) t = t.transpose(); // -> [N, 4+nc]
-      const boxes = t.slice([0, 0], [-1, 4]); // cx,cy,w,h in imgsz px
-      const clsScores = t.slice([0, 4], [-1, nc]);
-      const scores = clsScores.max(1);
-      const classes = clsScores.argMax(1);
-      const [cx, cy, w, h] = tf.split(boxes, 4, 1);
-      const y1 = cy.sub(h.div(2));
-      const x1 = cx.sub(w.div(2));
-      const y2 = cy.add(h.div(2));
-      const x2 = cx.add(w.div(2));
-      const boxesYX = tf.concat([y1, x1, y2, x2], 1);
-      return { boxesYX, scores, classes };
-    });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (Array.isArray(output) ? output : [output]).forEach((t: any) => t.dispose?.());
+    const scratch: any[] = Array.isArray(output) ? [...output] : [output];
+    let boxesArr: number[][] = [];
+    let scoresArr: number[] = [];
+    let classesArr: number[] = [];
+    try {
+      const outT = Array.isArray(output) ? output[0] : output;
+      const decoded = tf.tidy(() => {
+        let t = outT.squeeze(); // [4+nc, N] or [N, 4+nc]
+        if (t.shape[0] === 4 + nc) t = t.transpose(); // -> [N, 4+nc]
+        const boxes = t.slice([0, 0], [-1, 4]); // cx,cy,w,h in imgsz px
+        const clsScores = t.slice([0, 4], [-1, nc]);
+        const scores = clsScores.max(1);
+        const classes = clsScores.argMax(1);
+        const [cx, cy, w, h] = tf.split(boxes, 4, 1);
+        const y1 = cy.sub(h.div(2));
+        const x1 = cx.sub(w.div(2));
+        const y2 = cy.add(h.div(2));
+        const x2 = cx.add(w.div(2));
+        const boxesYX = tf.concat([y1, x1, y2, x2], 1);
+        return { boxesYX, scores, classes };
+      });
+      scratch.push(decoded.boxesYX, decoded.scores, decoded.classes);
 
-    const nms = await tf.image.nonMaxSuppressionAsync(
-      decoded.boxesYX,
-      decoded.scores,
-      maxDetections,
-      0.45,
-      0.2,
-    );
-    const selBoxes = tf.gather(decoded.boxesYX, nms);
-    const selScores = tf.gather(decoded.scores, nms);
-    const selClasses = tf.gather(decoded.classes, nms);
-    const boxesArr = (await selBoxes.array()) as number[][];
-    const scoresArr = (await selScores.array()) as number[];
-    const classesArr = (await selClasses.array()) as number[];
-    [decoded.boxesYX, decoded.scores, decoded.classes, nms, selBoxes, selScores, selClasses].forEach(
+      const nms = await tf.image.nonMaxSuppressionAsync(
+        decoded.boxesYX,
+        decoded.scores,
+        maxDetections,
+        0.45,
+        0.2,
+      );
+      scratch.push(nms);
+      const selBoxes = tf.gather(decoded.boxesYX, nms);
+      scratch.push(selBoxes);
+      const selScores = tf.gather(decoded.scores, nms);
+      scratch.push(selScores);
+      const selClasses = tf.gather(decoded.classes, nms);
+      scratch.push(selClasses);
+
+      boxesArr = (await selBoxes.array()) as number[][];
+      scoresArr = (await selScores.array()) as number[];
+      classesArr = (await selClasses.array()) as number[];
+    } finally {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (t: any) => t.dispose?.(),
-    );
+      scratch.forEach((t: any) => t.dispose?.());
+    }
 
     const sx = vw / imgsz;
     const sy = vh / imgsz;

@@ -102,6 +102,8 @@ export function useDetectionLoop() {
     let detectorLoading = false;
     const frameTimes: number[] = [];
     let lastDetections: RawDetection[] = [];
+    let detectFails = 0;
+    let detectError: string | null = null;
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const navAny = navigator as any;
@@ -178,6 +180,8 @@ export function useDetectionLoop() {
         posesActive: engine.poses.length,
         lowLightActive: lowLightState.active,
         luma: lowLightState.luma,
+        detectorErrors: detectFails,
+        detectorError: detectError,
       };
     }
 
@@ -209,8 +213,13 @@ export function useDetectionLoop() {
             detections = raw.filter((d) => d.score >= st.settings.confidence);
             lastDetections = detections;
             engine.inferenceMs = performance.now() - t0;
-          } catch {
-            /* keep previous detections */
+            detectFails = 0;
+            detectError = null;
+          } catch (e) {
+            // Keep the previous detections — but count it. A wedged detector
+            // otherwise leaves the HUD reading "ready" while every frame fails.
+            detectFails++;
+            detectError = (e as Error)?.message ?? "detect failed";
           }
         }
 

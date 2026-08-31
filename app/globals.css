@@ -72,6 +72,13 @@ button {
   color: var(--faint);
   font-weight: 500;
 }
+/* Inline metric captions. Tighter than .eyebrow, and the call site owns size
+   and colour so it can sit inside a header row at whatever weight it needs. */
+.mono-caps {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
 
 ::-webkit-scrollbar {
   width: 9px;

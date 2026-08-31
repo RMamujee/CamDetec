@@ -89,6 +89,9 @@ export interface Diagnostics {
   /** Whether the last inference input was brightened, and the luma that decided it. */
   lowLightActive: boolean;
   luma: number | null;
+  /** Consecutive failed `detect()` calls, and the last reason. Zero once a frame lands. */
+  detectorErrors: number;
+  detectorError: string | null;
 }
 
 export interface ActivityBucket {
