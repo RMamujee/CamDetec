@@ -12,6 +12,12 @@ import { lowLightState } from "./lowlight";
 import { captureSnapshot } from "./snapshot";
 import { putSnapshot } from "./history-db";
 import { fireAlert } from "./alerts";
+import {
+  releaseWakeLock,
+  requestWakeLock,
+  wakeLockState,
+  wakeLockSupported,
+} from "./wakelock";
 import type { Diagnostics, RawDetection, TrackedObject } from "./types";
 
 const uid = () =>
@@ -87,6 +93,16 @@ export function useDetectionLoop() {
   if (!motionRef.current) motionRef.current = new MotionDetector();
   if (!trackerRef.current) trackerRef.current = new Tracker();
   if (!poseRef.current) poseRef.current = new PoseEngine();
+
+  // Keep the screen awake only while there is something to watch: a sleeping
+  // display suspends rAF, and a suspended loop detects nothing.
+  const cameraStatus = useStore((s) => s.camera.status);
+  const wakeLockEnabled = useStore((s) => s.settings.wakeLockEnabled);
+  useEffect(() => {
+    if (cameraStatus === "live" && wakeLockEnabled) requestWakeLock();
+    else releaseWakeLock();
+    return () => releaseWakeLock();
+  }, [cameraStatus, wakeLockEnabled]);
 
   useEffect(() => {
     let raf = 0;
@@ -182,6 +198,12 @@ export function useDetectionLoop() {
         luma: lowLightState.luma,
         detectorErrors: detectFails,
         detectorError: detectError,
+        // Only meaningful while the camera is live — that is the only time the
+        // lock is asked for at all.
+        wakeLock:
+          wakeLockSupported() && useStore.getState().camera.status === "live"
+            ? wakeLockState.active
+            : null,
       };
     }
 
@@ -209,7 +231,14 @@ export function useDetectionLoop() {
         if (det && useStore.getState().model.status === "ready") {
           const t0 = performance.now();
           try {
-            const raw = await det.detect(video, st.settings.maxDetections, st.settings.lowLight);
+            const raw = await det.detect(
+              video,
+              st.settings.maxDetections,
+              st.settings.lowLight,
+              st.settings.confidence,
+            );
+            // The detector already applied the floor; this is the backstop for
+            // any model whose internal threshold is approximate.
             detections = raw.filter((d) => d.score >= st.settings.confidence);
             lastDetections = detections;
             engine.inferenceMs = performance.now() - t0;

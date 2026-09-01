@@ -70,6 +70,12 @@ export interface EventRecord {
   class?: string;
   message: string;
   trackId?: number;
+  /**
+   * Marked by hand as a false positive. Absent on every event logged before the
+   * feature — and on every event nobody has judged — which readers treat as
+   * "not flagged". Feeds the retrain export.
+   */
+  flagged?: boolean;
 }
 
 /** How the inference input is brightened: never applied to stored snapshots. */
@@ -92,6 +98,8 @@ export interface Diagnostics {
   /** Consecutive failed `detect()` calls, and the last reason. Zero once a frame lands. */
   detectorErrors: number;
   detectorError: string | null;
+  /** Screen wake lock: held / not held, or null when unsupported or the camera is off. */
+  wakeLock: boolean | null;
 }
 
 export interface ActivityBucket {
@@ -161,4 +169,7 @@ export interface Settings {
 
   /** Capture a JPEG of the frame behind each confirmed pest event. */
   snapshotsEnabled: boolean;
+
+  /** Hold a screen wake lock while the camera is live (dedicated-device mode). */
+  wakeLockEnabled: boolean;
 }

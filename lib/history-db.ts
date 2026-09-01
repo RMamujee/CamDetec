@@ -7,6 +7,7 @@
 // is a no-op during SSR.
 
 import type { EventRecord } from "./types";
+import { createZip, type ZipEntry } from "./zip";
 
 const DB_NAME = "camdetec";
 const STORE = "events";
@@ -19,7 +20,7 @@ const SNAPSHOT_MAX = 300;
  * them. Keep well over the 400 the in-memory log holds, so a reload still fills
  * the log and exports still cover days.
  */
-const EVENT_MAX = 1000;
+export const EVENT_MAX = 1000;
 /** Pruning walks the key list, so amortise it over many writes. */
 const PRUNE_EVERY = 50;
 let writesSincePrune = 0;
@@ -136,6 +137,28 @@ export async function getAllEvents(): Promise<EventRecord[]> {
     const req = tx.objectStore(STORE).index("t").getAll();
     req.onsuccess = () => resolve(req.result as EventRecord[]);
     req.onerror = () => reject(req.error);
+  });
+}
+
+/**
+ * Mark one stored event as a false positive (or clear the mark). Read-modify-
+ * write inside a single transaction so the rest of the record survives. An
+ * event that has already been pruned out of the durable log is a no-op here —
+ * the in-memory copy the UI is showing still updates.
+ */
+export async function setEventFlag(id: string, flagged: boolean): Promise<void> {
+  if (!hasIDB()) return;
+  const db = await openDB();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(STORE, "readwrite");
+    const events = tx.objectStore(STORE);
+    const req = events.get(id);
+    req.onsuccess = () => {
+      const row = req.result as EventRecord | undefined;
+      if (row) events.put({ ...row, flagged });
+    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
   });
 }
 
@@ -321,5 +344,49 @@ export async function exportEventsJson(includeImages = false): Promise<number> {
     new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }),
     `camdetec-events-${stamp()}.json`,
   );
+  return rows.length;
+}
+
+/**
+ * Retrain bundle: every event marked "not a pest", as `<id>.jpg` plus a
+ * `manifest.json` tying each file back to its event. This is the correction
+ * loop — the archive drops straight into Roboflow as negatives.
+ *
+ * Flagged events whose snapshot has been evicted (or was never taken) still
+ * appear in the manifest with `snapshot: false`, so the record of the mistake
+ * survives even when the image doesn't.
+ *
+ * Returns the number of flagged events; zero means nothing was downloaded.
+ */
+export async function exportFlaggedZip(): Promise<number> {
+  const rows = (await getAllEvents()).filter((r) => r.flagged);
+  if (rows.length === 0) return 0;
+
+  const entries: ZipEntry[] = [];
+  const manifest: Array<{
+    id: string;
+    timestamp: string;
+    message: string;
+    flagged: true;
+    snapshot: boolean;
+  }> = [];
+
+  for (const r of rows) {
+    const blob = await getSnapshot(r.id).catch(() => null);
+    if (blob) entries.push({ name: `${r.id}.jpg`, data: new Uint8Array(await blob.arrayBuffer()) });
+    manifest.push({
+      id: r.id,
+      timestamp: new Date(r.t).toISOString(),
+      message: r.message,
+      flagged: true,
+      snapshot: !!blob,
+    });
+  }
+
+  entries.push({
+    name: "manifest.json",
+    data: new TextEncoder().encode(JSON.stringify(manifest, null, 2)),
+  });
+  download(createZip(entries), `camdetec-flagged-${stamp()}.zip`);
   return rows.length;
 }

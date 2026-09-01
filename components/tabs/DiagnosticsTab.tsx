@@ -59,6 +59,17 @@ export default function DiagnosticsTab() {
       meter: d.luma != null ? Math.min(1, d.luma / 255) : undefined,
     },
     {
+      // Held only while the camera is live; "—" covers both a stopped camera
+      // and a browser without the API (Safari, Firefox).
+      k: "Screen lock",
+      v: d.wakeLock == null ? "—" : d.wakeLock ? "ON" : "OFF",
+      sub: d.wakeLock === false ? "not held" : undefined,
+      hint:
+        d.wakeLock == null
+          ? "Only held while the camera is live, and only where the Wake Lock API exists."
+          : "The display is kept awake so the detection loop keeps running.",
+    },
+    {
       // A detector that fails every frame still reports "ready" — this is the
       // only place that shows it.
       k: "Detect errors",

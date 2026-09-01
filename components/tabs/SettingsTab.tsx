@@ -1,7 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
-import { useStore } from "@/lib/store";
+import { CONFIDENCE_MAX, CONFIDENCE_MIN, useStore } from "@/lib/store";
 import { engine } from "@/lib/engine";
+import { wakeLockSupported } from "@/lib/wakelock";
 import { PEST_CANDIDATE_CLASSES } from "@/lib/pest";
 import { LOW_LIGHT_THRESHOLD } from "@/lib/lowlight";
 import { captureSnapshot } from "@/lib/snapshot";
@@ -45,6 +46,9 @@ export default function SettingsTab({
   const [perm, setPerm] = useState<NotificationPermission | "unsupported" | null>(null);
   const [testing, setTesting] = useState(false);
   useEffect(() => setPerm(notificationPermission()), []);
+  // Read after mount for the same reason: `navigator` doesn't exist on the server.
+  const [wakeSupported, setWakeSupported] = useState(false);
+  useEffect(() => setWakeSupported(wakeLockSupported()), []);
 
   const resetSession = () => {
     resetStats();
@@ -115,12 +119,15 @@ export default function SettingsTab({
         <div className="setrow">
           <div className="lbl">
             Confidence threshold
-            <small>Minimum score to register a detection.</small>
+            <small>
+              Minimum score to register a detection. Applied inside the model — lower it to catch
+              faint pests, raise it to cut false positives.
+            </small>
           </div>
           <input
             type="range"
-            min={0.1}
-            max={0.9}
+            min={CONFIDENCE_MIN}
+            max={CONFIDENCE_MAX}
             step={0.05}
             value={settings.confidence}
             onChange={(e) => setSetting("confidence", Number(e.target.value))}
@@ -239,6 +246,21 @@ export default function SettingsTab({
           </div>
           <div />
           <Switch on={settings.mirror} onClick={() => setSetting("mirror", !settings.mirror)} />
+        </div>
+        <div className="setrow">
+          <div className="lbl">
+            Keep screen awake
+            <small>
+              For a device left watching a room: a sleeping display suspends the detection loop.
+            </small>
+          </div>
+          <div className="sub-line">
+            {wakeSupported ? "supported by this browser" : "not supported by this browser"}
+          </div>
+          <Switch
+            on={settings.wakeLockEnabled}
+            onClick={() => setSetting("wakeLockEnabled", !settings.wakeLockEnabled)}
+          />
         </div>
         <div className="setrow">
           <div className="lbl">Camera control</div>

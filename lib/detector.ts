@@ -11,15 +11,26 @@ export interface Detector {
   readonly label: string;
   readonly vocabulary: string;
   load(onProgress?: (msg: string) => void): Promise<void>;
-  /** `lowLight` brightens the inference input only; stored frames stay raw. */
+  /**
+   * `lowLight` brightens the inference input only; stored frames stay raw.
+   * `minScore` is the confidence floor, applied as far inside the model as it
+   * can be — the loop re-checks it, but discarding weak boxes early saves the
+   * work of decoding them.
+   */
   detect(
     input: HTMLVideoElement,
     maxDetections: number,
     lowLight?: LowLightMode,
+    minScore?: number,
   ): Promise<RawDetection[]>;
   backend(): string;
   dispose(): void;
 }
+
+/** coco-ssd's own default floor, kept so an omitted `minScore` changes nothing. */
+const COCO_SSD_MIN_SCORE = 0.5;
+/** The floor baked into the YOLO decode's NMS before it became configurable. */
+const YOLO_MIN_SCORE = 0.2;
 
 /** COCO-SSD (TensorFlow.js) — general 80-class detector, runs fully in-browser. */
 export class CocoSsdDetector implements Detector {
@@ -53,6 +64,7 @@ export class CocoSsdDetector implements Detector {
     input: HTMLVideoElement,
     maxDetections: number,
     lowLight: LowLightMode = "off",
+    minScore: number = COCO_SSD_MIN_SCORE,
   ): Promise<RawDetection[]> {
     if (!this.model) return [];
     const tf = this.tf;
@@ -67,7 +79,21 @@ export class CocoSsdDetector implements Detector {
       );
     }
     try {
-      const preds = await this.model.detect(boosted ?? input, maxDetections);
+      // Third arg is coco-ssd's own minimum score: without it the model would
+      // hard-filter at 0.5 no matter where the slider sits. But coco-ssd hands
+      // that one number to NMS twice — `nonMaxSuppression(boxes, scores, max,
+      // minScore, minScore)` — so it is the IoU threshold as well. Raising it
+      // past 0.5 therefore stops suppressing duplicates: one rat comes back as
+      // a dozen boxes, a dozen tracks, and a dozen pest alerts, which is the
+      // exact opposite of what "raise it to cut false positives" promises.
+      // So cap the value the model sees at the 0.5 that used to be hardcoded —
+      // box geometry never gets looser than it was — and let the loop's
+      // post-filter enforce anything stricter.
+      const preds = await this.model.detect(
+        boosted ?? input,
+        maxDetections,
+        Math.min(minScore, COCO_SSD_MIN_SCORE),
+      );
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return preds.map((p: any) => ({
         bbox: p.bbox as [number, number, number, number],
@@ -143,6 +169,7 @@ export class YoloTfjsDetector implements Detector {
     input: HTMLVideoElement,
     maxDetections: number,
     lowLight: LowLightMode = "off",
+    minScore: number = YOLO_MIN_SCORE,
   ): Promise<RawDetection[]> {
     if (!this.model || !this.tf) return [];
     const tf = this.tf;
@@ -195,12 +222,14 @@ export class YoloTfjsDetector implements Detector {
       });
       scratch.push(decoded.boxesYX, decoded.scores, decoded.classes);
 
+      // NMS selects strictly in descending score order, so raising this floor
+      // can only truncate the weak tail — never change which strong boxes win.
       const nms = await tf.image.nonMaxSuppressionAsync(
         decoded.boxesYX,
         decoded.scores,
         maxDetections,
         0.45,
-        0.2,
+        minScore,
       );
       scratch.push(nms);
       const selBoxes = tf.gather(decoded.boxesYX, nms);

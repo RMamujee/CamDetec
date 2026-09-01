@@ -1,8 +1,19 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "@/lib/store";
-import { exportEventsCsv, exportEventsJson, clearHistory, getSnapshot } from "@/lib/history-db";
+import {
+  clearHistory,
+  EVENT_MAX,
+  exportEventsCsv,
+  exportEventsJson,
+  exportFlaggedZip,
+  getSnapshot,
+} from "@/lib/history-db";
 import type { EventKind, EventRecord } from "@/lib/types";
+
+/** Why the retrain export exists — reused on every control that feeds it. */
+const RETRAIN_HINT =
+  "Download flagged snapshots to correct the model (upload to Roboflow as negatives)";
 
 const KINDS: (EventKind | "all")[] = [
   "all",
@@ -78,7 +89,15 @@ function EventThumb({ id, onOpen }: { id: string; onOpen: () => void }) {
 }
 
 /** Full-size viewer. Loads its own copy so it survives the row unmounting. */
-function SnapshotViewer({ event, onClose }: { event: EventRecord; onClose: () => void }) {
+function SnapshotViewer({
+  event,
+  onClose,
+  onToggleFlag,
+}: {
+  event: EventRecord;
+  onClose: () => void;
+  onToggleFlag: () => void;
+}) {
   const [url, setUrl] = useState<string | null>(null);
 
   // Keyed on the event alone: `onClose` is a fresh closure every parent render,
@@ -122,6 +141,16 @@ function SnapshotViewer({ event, onClose }: { event: EventRecord; onClose: () =>
           <div className="empty-note">loading snapshot…</div>
         )}
         <div className="lightbox-foot">
+          {event.kind === "pest" && (
+            <button
+              className={`btn ghost${event.flagged ? " flagged" : ""}`}
+              onClick={onToggleFlag}
+              title={RETRAIN_HINT}
+              style={{ marginRight: "auto" }}
+            >
+              {event.flagged ? "Flagged ✓" : "Not a pest"}
+            </button>
+          )}
           {url && (
             <a className="btn ghost" href={url} download={`camdetec-${event.id}.jpg`}>
               Download
@@ -139,12 +168,39 @@ function SnapshotViewer({ event, onClose }: { event: EventRecord; onClose: () =>
 export default function EventsTab() {
   const events = useStore((s) => s.events);
   const clearEvents = useStore((s) => s.clearEvents);
+  const toggleEventFlag = useStore((s) => s.toggleEventFlag);
   const activity = useStore((s) => s.activity);
   const histCount = useStore((s) => s.histCount);
   const setHistCount = useStore((s) => s.setHistCount);
   const [filter, setFilter] = useState<EventKind | "all">("all");
+  // Flagged is orthogonal to kind — an event has both a kind and a verdict —
+  // so it narrows whatever kind filter is active rather than replacing it.
+  const [flaggedOnly, setFlaggedOnly] = useState(false);
   const [withImages, setWithImages] = useState(false);
-  const [viewing, setViewing] = useState<EventRecord | null>(null);
+  // Held by id, not by value, so the open viewer picks up its own flag changes.
+  const [viewingId, setViewingId] = useState<string | null>(null);
+  const viewing = useMemo(
+    () => events.find((e) => e.id === viewingId) ?? null,
+    [events, viewingId],
+  );
+
+  async function exportFlagged() {
+    if (typeof window === "undefined") return;
+    try {
+      const n = await exportFlaggedZip();
+      if (n === 0) {
+        window.alert('No events are flagged yet — open a pest snapshot and mark it "Not a pest".');
+      }
+    } catch {
+      // Reading history can fail outright — private browsing, or another tab
+      // holding an older database version open. Say so rather than letting the
+      // button do nothing: the flags still on screen are in-memory only in that
+      // case, so silence here looks identical to an empty archive.
+      window.alert(
+        "Couldn't read saved history, so nothing was exported. Flags marked in this session may not have been saved.",
+      );
+    }
+  }
 
   async function wipeHistory() {
     if (typeof window !== "undefined" && !window.confirm("Delete all saved event history and snapshots? This cannot be undone.")) {
@@ -155,10 +211,10 @@ export default function EventsTab() {
     setHistCount(0);
   }
 
-  const filtered = useMemo(
-    () => (filter === "all" ? events : events.filter((e) => e.kind === filter)),
-    [events, filter],
-  );
+  const filtered = useMemo(() => {
+    const byKind = filter === "all" ? events : events.filter((e) => e.kind === filter);
+    return flaggedOnly ? byKind.filter((e) => e.flagged) : byKind;
+  }, [events, filter, flaggedOnly]);
 
   const maxCount = Math.max(1, ...activity.map((a) => a.count));
 
@@ -176,12 +232,23 @@ export default function EventsTab() {
               {k}
             </button>
           ))}
+          <button
+            className={`chip sm${flaggedOnly ? " on" : ""}`}
+            onClick={() => setFlaggedOnly((v) => !v)}
+            title="Show only events marked as false positives"
+          >
+            flagged
+          </button>
           <span
             className="mono-caps"
             style={{ marginLeft: 8, fontSize: 10, color: "var(--faint)", alignSelf: "center" }}
-            title="events saved to persistent history"
+            title={
+              histCount >= EVENT_MAX
+                ? `Persistent history is capped at ${EVENT_MAX} events — older events are pruned as new ones arrive. Export to keep them.`
+                : "events saved to persistent history"
+            }
           >
-            {histCount} saved
+            {histCount} saved{histCount >= EVENT_MAX ? " · capped" : ""}
           </span>
           <button className="btn ghost" onClick={() => exportEventsCsv()} style={{ marginLeft: 8 }} title="Download all saved events as CSV">
             CSV
@@ -195,6 +262,9 @@ export default function EventsTab() {
             title="Embed snapshot images in the JSON export as base64 — much larger files"
           >
             + images
+          </button>
+          <button className="btn ghost" onClick={() => void exportFlagged()} title={RETRAIN_HINT}>
+            Export flagged
           </button>
           <button className="btn ghost" onClick={clearEvents} title="Clear the on-screen log (saved history is kept)">
             Clear
@@ -243,13 +313,27 @@ export default function EventsTab() {
           <div key={e.id} className={`evt${e.kind === "pest" ? " pest" : ""}`}>
             <span className="evt-time">{fmtTime(e.t)}</span>
             <span className={`evt-kind ${e.kind}`}>{e.kind}</span>
-            <span className="evt-msg">{e.message}</span>
-            {e.kind === "pest" && <EventThumb id={e.id} onOpen={() => setViewing(e)} />}
+            {/* The chip lives inside the message cell so the row keeps its four columns. */}
+            <span className="evt-msg">
+              {e.message}
+              {e.flagged && (
+                <span className="evt-flag" title="Marked as a false positive">
+                  not a pest
+                </span>
+              )}
+            </span>
+            {e.kind === "pest" && <EventThumb id={e.id} onOpen={() => setViewingId(e.id)} />}
           </div>
         ))}
       </div>
 
-      {viewing && <SnapshotViewer event={viewing} onClose={() => setViewing(null)} />}
+      {viewing && (
+        <SnapshotViewer
+          event={viewing}
+          onClose={() => setViewingId(null)}
+          onToggleFlag={() => toggleEventFlag(viewing.id)}
+        />
+      )}
     </div>
   );
 }

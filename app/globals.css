@@ -718,6 +718,27 @@ button {
 .evt.pest .evt-msg {
   color: var(--signal);
 }
+/* A human verdict on a machine call — deliberately muted, so a corrected row
+   reads as settled rather than as more activity. */
+.evt-flag {
+  display: inline-block;
+  margin-left: 9px;
+  padding: 1px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--faint);
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 9px;
+  vertical-align: middle;
+}
+.btn.flagged {
+  border-color: var(--cool-dim);
+  background: rgba(87, 199, 207, 0.1);
+  color: var(--text);
+}
 
 /* evidence snapshots */
 .evt-thumb {

@@ -14,13 +14,17 @@ import type {
 } from "./types";
 import type { AlertStatus } from "./alerts";
 import { DEFAULT_PEST_CLASSES } from "./pest";
-import { persistEvent } from "./history-db";
+import { persistEvent, setEventFlag } from "./history-db";
 
 const ACTIVITY_BUCKET_MS = 15_000; // 15s buckets
 const ACTIVITY_MAX = 60; // -> 15 minutes of history
 const EVENTS_MAX = 400;
 const ZONES_KEY = "camdetec.zones.v1";
 const ALERTS_KEY = "camdetec.alerts.v1";
+
+/** Bounds of the confidence slider, shared with the persisted-value validator. */
+export const CONFIDENCE_MIN = 0.15;
+export const CONFIDENCE_MAX = 0.85;
 
 function loadZones(): Zone[] {
   if (typeof window === "undefined") return [];
@@ -81,6 +85,8 @@ interface Store {
   events: EventRecord[];
   addEvent: (e: EventRecord) => void;
   clearEvents: () => void;
+  /** Mark/unmark an event as a false positive, in memory and in the durable log. */
+  toggleEventFlag: (id: string) => void;
   /** persistent-history count (IndexedDB), and mount-time seeding from it */
   histCount: number;
   seedEvents: (events: EventRecord[], count: number) => void;
@@ -138,6 +144,7 @@ const baseSettings: Settings = {
   telegramToken: "",
   telegramChatId: "",
   snapshotsEnabled: true,
+  wakeLockEnabled: true,
 };
 
 /**
@@ -147,6 +154,7 @@ const baseSettings: Settings = {
  */
 const PERSISTED_KEYS = [
   "lowLight",
+  "confidence",
   "alertMinFrames",
   "alertCooldownSec",
   "notifyEnabled",
@@ -156,6 +164,7 @@ const PERSISTED_KEYS = [
   "telegramToken",
   "telegramChatId",
   "snapshotsEnabled",
+  "wakeLockEnabled",
 ] as const;
 const PERSISTED = new Set<string>(PERSISTED_KEYS);
 
@@ -163,6 +172,15 @@ const PERSISTED = new Set<string>(PERSISTED_KEYS);
 const PERSISTED_ENUMS: Record<string, readonly string[]> = {
   lowLight: ["auto", "on", "off"],
   webhookKind: ["discord", "telegram"],
+};
+
+/**
+ * Numeric fields need their range checked too — a hand-edited confidence of 5
+ * would silently blind the detector. Bounds match the Settings slider, and the
+ * comparison rejects NaN for free.
+ */
+const PERSISTED_RANGES: Record<string, readonly [number, number]> = {
+  confidence: [CONFIDENCE_MIN, CONFIDENCE_MAX],
 };
 
 function loadPersistedSettings(): Partial<Settings> {
@@ -176,6 +194,8 @@ function loadPersistedSettings(): Partial<Settings> {
       if (typeof raw[k] !== typeof baseSettings[k]) continue;
       const allowed = PERSISTED_ENUMS[k];
       if (allowed && !allowed.includes(raw[k])) continue;
+      const range = PERSISTED_RANGES[k];
+      if (range && !(raw[k] >= range[0] && raw[k] <= range[1])) continue;
       out[k] = raw[k];
     }
     return out as Partial<Settings>;
@@ -205,7 +225,7 @@ const initialStats = (): Stats => ({
   sessionStart: Date.now(),
 });
 
-export const useStore = create<Store>((set) => ({
+export const useStore = create<Store>((set, get) => ({
   activeTab: "live",
   setActiveTab: (t) => set({ activeTab: t }),
 
@@ -254,6 +274,14 @@ export const useStore = create<Store>((set) => ({
     set((s) => ({ events: [e, ...s.events].slice(0, EVENTS_MAX), histCount: s.histCount + 1 }));
   },
   clearEvents: () => set({ events: [] }),
+  toggleEventFlag: (id) => {
+    const current = get().events.find((e) => e.id === id);
+    if (!current) return;
+    const flagged = !current.flagged;
+    // Durable copy first (fire-and-forget); the UI must not wait on IndexedDB.
+    void setEventFlag(id, flagged).catch(() => {});
+    set((s) => ({ events: s.events.map((e) => (e.id === id ? { ...e, flagged } : e)) }));
+  },
   seedEvents: (loaded, count) =>
     set((s) => {
       // merge history under any events already logged this session (dedupe by id)
@@ -312,6 +340,7 @@ export const useStore = create<Store>((set) => ({
     luma: null,
     detectorErrors: 0,
     detectorError: null,
+    wakeLock: null,
   },
   setDiagnostics: (d) => set({ diagnostics: d }),
 
