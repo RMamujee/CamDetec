@@ -1,62 +1,102 @@
-# CamDetec — Tactical Detection Console
+# CamDetec: In-Browser Pest Detection Console
 
-In-browser, privacy-first motion & object detection. Your webcam feed **never
-leaves the device** — all inference runs locally via TensorFlow.js. Built toward
-**pest / wildlife camera monitoring**: point a camera at a doorway, garden, or
-feeder and let it watch.
+**Live demo: [cam-detec.vercel.app](https://cam-detec.vercel.app)** (needs a webcam; click *Arm console*)
+
+Point a camera at a doorway, garage, or crawlspace and CamDetec watches for
+rodents, logs every sighting with a snapshot, and maps where pests enter and
+linger. All inference runs **locally in the browser** with TensorFlow.js, so
+the video feed never leaves the device and there's no server cost.
+
+![CamDetec console](docs/screenshot.png)
+
+**Highlights**
+
+- **Custom rodent detector.** I trained a YOLOv8n model on 6 merged rodent
+  datasets (mAP50 **0.919**, mAP50-95 0.710) and converted it to run in the
+  browser (~19 ms per frame warm in testing).
+- **Real-time pipeline.** Object detection, frame-differencing motion
+  detection, an IoU tracker with smoothing for stable IDs, and MoveNet pose,
+  all driven from a single `requestAnimationFrame` loop outside React.
+- **Built for unattended use.** Discord/Telegram/browser alerts, evidence
+  snapshots in IndexedDB, low-light boost, a dwell heatmap with trap-placement
+  suggestions, and an installable PWA with screen wake lock.
+- **Retraining loop.** Flag false positives in the UI and export them as a ZIP
+  ready to upload back to Roboflow for the next training run.
+
+**Stack:** Next.js 16, React 19, TypeScript, TensorFlow.js, three.js /
+react-three-fiber, zustand, IndexedDB · Training: Python, Ultralytics YOLOv8,
+Google Colab, ONNX
+
+---
 
 ## What it does
 
-- **Live detection** — COCO-SSD (MobileNet v2) object detection with IoU
+- **Live detection.** Pick COCO-SSD (MobileNet v2, ~80 general classes) or the
+  custom **YOLOv8 rodent model** in Settings. Detections go through IoU
   **object tracking + temporal smoothing** for stable boxes, stable IDs, and
-  enter/exit events (a big accuracy/feel upgrade over raw per-frame detection).
-- **Motion detection** — model-free frame-differencing that flags *where*
-  something is moving, even for objects the classifier has never seen. This is
-  the honest, working core of pest detection today.
-- **Tabbed HUD** — Live, 3D spatial map, Events, Diagnostics, Settings. Overlays
-  are toggle chips on the top bar and side rail, not a fixed wall of stats.
-- **3D view** — a maximized spatial map that places contacts and motion zones on
-  a floor grid relative to the camera's field of view.
-- **Pest mode** — flags configured classes (and unclassified motion) as pest
-  contacts, logs them with timestamps, and surfaces them across the UI.
+  enter/exit events.
+- **Motion detection.** Model-free frame differencing flags *where* something
+  is moving, even for objects no model recognizes.
+- **Tabbed HUD.** Live, Pest Map, 3D, Events, Diagnostics, Settings. Overlays
+  are toggle chips, not a fixed wall of stats.
+- **Pest Map.** A dwell heatmap of where pests spend time, with suggested trap
+  locations.
+- **3D view.** Places contacts and motion zones on a floor grid relative to the
+  camera's field of view.
+- **Events + evidence.** Every pest event is saved to IndexedDB with an
+  annotated snapshot and can be exported as CSV/JSON.
+- **Alerts.** Browser notifications and Discord/Telegram webhooks with
+  per-channel cooldowns, sent straight from the browser (no backend).
 
-## Pest control roadmap
+## The rodent model
 
-COCO-SSD knows ~80 general classes (person, bird, cat, dog…) but **not** rodents
-or insects. Species-level pest ID needs a purpose-built model. The detector is a
-**swappable module** (`lib/detector.ts` → `Detector` interface) so that model
-drops in without touching the tracker, motion engine, or UI. Until then, motion
-detection covers off-vocabulary pests by movement.
+COCO-SSD doesn't know rodents, so `training/train_pest_model.ipynb` trains one:
+
+1. Merges 3 private + 3 public Roboflow rodent datasets into a single `rodent`
+   class.
+2. Trains YOLOv8n at 640px on a free Colab T4, checkpointing to Google Drive so
+   a dropped session resumes instead of restarting.
+3. Exports to TensorFlow.js. Ultralytics' tfjs export doesn't work on Windows,
+   so the conversion goes ONNX → onnx2tf → tfjs, parity-checked against ONNX
+   (max abs diff 4.3e-4).
+
+The detector sits behind a `Detector` interface (`lib/detector.ts`), so the
+model swapped in without touching the tracker, motion engine, or UI. See
+[training/README.md](training/README.md) for details.
 
 ## Architecture
 
 ```
 lib/
-  detector.ts        pluggable Detector interface + COCO-SSD implementation
-  motion.ts          frame-differencing motion detector (grid + regions)
-  tracker.ts         greedy IoU tracker with EMA smoothing
-  pest.ts            pest-class predicate + defaults
-  engine.ts          hot-path state shared with render loops (outside React)
-  store.ts           zustand store (UI state + throttled snapshots)
-  useCamera.ts       getUserMedia lifecycle
+  detector.ts          pluggable Detector interface (COCO-SSD + YOLO tfjs)
+  motion.ts            frame-differencing motion detector (grid + regions)
+  tracker.ts           greedy IoU tracker with EMA smoothing
+  pose.ts              MoveNet limb tracking
+  dwell.ts             dwell heatmap + trap suggestions
+  pest.ts              pest-class predicate + defaults
+  engine.ts            hot-path state shared with render loops (outside React)
+  store.ts             zustand store (UI state + throttled snapshots)
+  history-db.ts        IndexedDB event + snapshot history
+  alerts.ts            browser / Discord / Telegram alerts
+  snapshot.ts          annotated evidence snapshots
+  lowlight.ts          gamma/contrast boost for dark scenes
+  zip.ts               dependency-free ZIP writer for flagged-event export
+  useCamera.ts         getUserMedia lifecycle
   useDetectionLoop.ts  the rAF loop that drives everything
 components/
-  hud/               TopBar, DetectionOverlay (live canvas), ToggleChip
-  tabs/              Live, Spatial (3D), Events, Diagnostics, Settings
-  three/             SpatialView (react-three-fiber)
+  hud/                 TopBar, DetectionOverlay (live canvas), ToggleChip
+  tabs/                Live, Pest Map, 3D, Events, Diagnostics, Settings
+  three/               SpatialView (react-three-fiber)
 ```
 
 Per-frame data lives in `engine` (a plain module singleton) so the render loops
-read it every rAF without triggering React re-renders. Only low-frequency
+read it every frame without triggering React re-renders. Only low-frequency
 snapshots (contacts, stats, diagnostics) flow through the store.
 
 ## Develop
 
 ```bash
 npm install
-npm run dev      # http://localhost:3000 — allow camera access
+npm run dev      # http://localhost:3000 (allow camera access)
 npm run build
 ```
-
-Stack: Next.js 16 (App Router, fully client-side page), React 19, TensorFlow.js,
-three.js / react-three-fiber, zustand.
